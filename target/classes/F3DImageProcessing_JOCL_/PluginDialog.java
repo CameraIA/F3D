@@ -4,23 +4,29 @@ import java.awt.BorderLayout;
 import java.awt.Component;
 import java.awt.GridLayout;
 import java.awt.Panel;
-//import java.awt.TextArea;
+import java.awt.Rectangle;
+import java.awt.Scrollbar;
 import java.awt.event.ActionEvent;
 import java.awt.event.ActionListener;
+import java.awt.event.AdjustmentEvent;
+import java.awt.event.AdjustmentListener;
 import java.awt.event.ItemEvent;
 import java.awt.event.ItemListener;
-//import java.util.HashSet;
-//import java.util.Vector;
-
-
+import java.awt.image.ColorModel;
 import java.io.File;
+import java.text.DateFormat;
+import java.text.SimpleDateFormat;
 import java.util.ArrayList;
+import java.util.Date;
+import java.util.HashMap;
+
 import javax.swing.BoxLayout;
 import javax.swing.JButton;
 import javax.swing.JCheckBox;
 import javax.swing.JComboBox;
 import javax.swing.JFileChooser;
 import javax.swing.JLabel;
+import javax.swing.JOptionPane;
 import javax.swing.JPanel;
 import javax.swing.JScrollPane;
 import javax.swing.JSpinner;
@@ -36,76 +42,154 @@ import org.json.simple.JSONObject;
 import org.json.simple.parser.JSONParser;
 import org.json.simple.parser.ParseException;
 
-import com.jogamp.opencl.CLContext;
 import com.jogamp.opencl.CLDevice;
 
 import ij.ImagePlus;
-//import ij.gui.DialogListener;
-//import ij.ImagePlus;
+import ij.ImageStack;
 import ij.Macro;
 import ij.WindowManager;
 import ij.gui.GenericDialog;
+import ij.gui.ImageCanvas;
 import ij.plugin.frame.Recorder;
-
-public class PluginDialog
+import ij.process.ImageProcessor;
+/**!
+ * The main user interface for the F3D plugin.
+ * 1. Enables user to create a custom workflow of F3D filters.
+ * 2. Selection of OpenCL accelerators
+ * 3. Whether or not to write to memory or virtual directory.
+ * 4. Limit number of resources (such as slices) available to each resource.
+ * 
+ * @author hari
+ * @author tperciano
+ */
+public class PluginDialog implements AdjustmentListener
 {
 	GenericDialog gd;
 	FilteringAttributes gatts;
+	
+	public HashMap<String, JOCLFilter> filterList;
 	int maxNumDevices;
 	CLDevice[] devices;
-	CLContext context;
 	
 	ArrayList<CLDevice> chosenDevices;
 	ArrayList<Integer> chosenDevicesIdxs;
 
-	
-	//public String lastTitle = "";
-	/// TODO: turn these variables private after testing.
-	//public int inputDeviceLength = 1;
-	//public boolean useVirtualStack = false;
-	//public boolean chooseConstantDevices = false;
-	//public File virtualDirectory = null;
-	
 	JPanel filterPanel;
 	JPanel devicePanel;
+	JPanel previewPanel;
 	ImagePlus activeInput;
+	ImagePlus previewInput = null;
+	ImagePlus previewResult = null;
 	JOCLFilter activeFilter;
 	String[] types = null;
-	JComboBox inputBox;
+	JComboBox<String> inputBox;
+	JComboBox<String> typeBox;
+	ArrayList<JSpinner> devicesSpList;
+	F3DImageProcessing_JOCL_ filter;
+	Scrollbar sliceSelector;
+	ImageCanvas imageCanvas;
+	JPanel previewJPanel;
+	JButton previewb;
 	
 	DefaultTableModel model;
 	JTable table;
+	F3DMonitor monitor;
+	
+	boolean useVirtualStack;
+	File virtualDirectory;
 
-	PluginDialog() {
-		
+	/**
+	 * @param monitor F3D monitor
+	 */
+	PluginDialog(F3DMonitor monitor, F3DImageProcessing_JOCL_ filter) {
+		this.monitor = monitor;
+		this.filter = filter;
 		chosenDevices = new ArrayList<CLDevice>();
 		chosenDevicesIdxs = new ArrayList<Integer>();
-		
-//		context = CLContext.create();
-//        devices = context.getDevices();
-//        maxNumDevices = devices.length;
-		
-		
-		gd = new GenericDialog("F3D Parameters");
+
+		/**
+		 * create instance of dialog class.
+		 * each part of the dialog has a different purpose.
+		 */
+		gd = new GenericDialog("F3D -- Fast 3D Non-Linear Filtering");
 		filterPanel = new JPanel();
 		devicePanel = new JPanel();
+		previewPanel = new JPanel();
 		
-		
+		/**
+		 * the initial filter attribute.
+		 */
 		gatts = new FilteringAttributes();
 		activeFilter = null;
 		activeInput = null;
-		types = new String[gatts.filterList.keySet().size()];
-		types = gatts.filterList.keySet().toArray(types);
+		
+		/**!
+    	 * List all filters available
+    	 */
+		
+		filterList = new HashMap<String, JOCLFilter>();
+		for(int i = 0; i < JOCLFilter.filters.size(); ++i){
+			filterList.put(JOCLFilter.filters.get(i).getName(), 
+					       JOCLFilter.filters.get(i));
+		}
+		types = new String[filterList.keySet().size()];
+		types = filterList.keySet().toArray(types);
 		java.util.Arrays.sort(types);
 		
 	}
 
-	public void setContext(CLContext contx) {
-		context = contx;
-		devices = context.getDevices();
+	/**
+	 * set all the available devices.
+	 * @param devices
+	 */
+	public void setDevices(CLDevice[] devices) {
+		this.devices = devices;
 		maxNumDevices = devices.length;
 	}
 	
+	/**
+	 * Creates top panel for the GUI
+	 * @return Top awt panel
+	 */
+	public Panel createTopPanel() {
+		Panel top = new Panel();
+		
+		JPanel topJPanel = new JPanel();
+		topJPanel.setLayout(new BoxLayout(topJPanel, BoxLayout.X_AXIS));
+		
+		//Create two main panels horizontally
+		topJPanel.add(createLeftPanel());
+		topJPanel.add(createPreviewerPanel());
+		
+		top.add(topJPanel);
+		return top;
+	}
+	
+	/**
+	 * Creates left part of top panel for the GUI
+	 * @return Left top awt panel
+	 */
+	public Panel createLeftPanel() {
+		Panel left = new Panel();
+
+		JPanel leftJPanel = new JPanel();
+		leftJPanel.setLayout(new BoxLayout(leftJPanel, BoxLayout.Y_AXIS));
+
+		leftJPanel.add(createHeader());
+		leftJPanel.add(createWorkflow());
+		leftJPanel.add(createFooter());
+		selectedItemChanged(types[0]);
+		leftJPanel.add(createFooterDevices());
+
+		left.add(leftJPanel);
+
+		return left;
+	}
+	
+	/**
+	 * Creates header panel for the GUI
+	 * @return Header awt panel
+	 */
 	@SuppressWarnings({ "unchecked", "rawtypes" })
 	public Panel createHeader() {
 		Panel header = new Panel();
@@ -118,23 +202,34 @@ public class PluginDialog
 		inputBox = new JComboBox(
 				FilteringAttributes.getImageTitles(false));
 
-		gatts.inputImage = WindowManager.getImage((String) inputBox
+		activeInput = WindowManager.getImage((String) inputBox
 				.getSelectedItem());
 
 		inputBox.addItemListener(new ItemListener() {
 			@Override
 			public void itemStateChanged(ItemEvent e) {
 				if (e.getStateChange() == java.awt.event.ItemEvent.SELECTED) {
-					gatts.inputImage = WindowManager.getImage((String) e.getItem());
+					activeInput = WindowManager.getImage((String) e.getItem());
 					selectedItemChangedInput();
 					cleanWorkflowTable();
+					updatePreviewInput();
+					//TODO Figure out a better way to update the panels
+					previewJPanel.remove(imageCanvas);
+					previewJPanel.remove(sliceSelector);
+					previewJPanel.remove(previewb);
+					imageCanvas = new ImageCanvas(previewResult);
+			        imageCanvas.setVisible(true); 
+			        previewJPanel.add(imageCanvas, BorderLayout.CENTER);
+					previewJPanel.add(sliceSelector, BorderLayout.SOUTH);
+					previewJPanel.add(previewb);
+			        previewJPanel.revalidate();
+			        previewJPanel.repaint();
 				}
 			}
 		});
 
-		// gd.addChoice("Algorithm", types, types[0]);
 		JLabel algorithmLabel = new JLabel("Algorithm");
-		JComboBox typeBox = new JComboBox(types);
+		typeBox = new JComboBox(types);
 		typeBox.addItemListener(new ItemListener() {
 			@Override
 			public void itemStateChanged(ItemEvent e) {
@@ -155,6 +250,10 @@ public class PluginDialog
 		return header;
 	}
 
+	/**
+	 * Creates workflow panel for the GUI
+	 * @return Workflow awt panel
+	 */
 	public Panel createWorkflow() {
 		Panel workflow = new Panel();
 		workflow.setLayout(new BorderLayout());
@@ -170,7 +269,8 @@ public class PluginDialog
 
 		JScrollPane scrollPane = new JScrollPane(table);
 		table.setFillsViewportHeight(true);
-
+		table.setPreferredScrollableViewportSize(new java.awt.Dimension(50, 50));
+		
 		JButton addButton = new JButton("Add Filter to Workflow");
 		JButton removeButton = new JButton("Remove Filter");
 
@@ -178,16 +278,15 @@ public class PluginDialog
 			@Override
 			public void actionPerformed(ActionEvent e) {
 				activeFilter.processFilterWindowComponent();
-				gatts.filters.add(activeFilter);
+				gatts.pipeline.add(activeFilter);
 
 				model.addRow(new String[] { activeFilter.getName(),
-						activeFilter.toString() });
+						activeFilter.toJSONString() });
 
 				// /reset the activeFilter..
 				selectedItemChanged(activeFilter.getName());
 				gd.validate();
 				gd.repaint();
-				
 			}
 		});
 		
@@ -203,7 +302,7 @@ public class PluginDialog
 				
 				for(int i = selectedRows.length-1; i >= 0; --i) {
 					model.removeRow(selectedRows[i]);	
-					gatts.filters.remove(selectedRows[i]);
+					gatts.pipeline.remove(selectedRows[i]);
 				}
 			}
 		});
@@ -221,62 +320,45 @@ public class PluginDialog
 		return workflow;
 	}
 	
+	/**
+	 * Clean the work flow entries and pipeline.
+	 */
 	public void cleanWorkflowTable() {
-		//System.out.println("Table cleaned!");
 		int numRows = table.getRowCount();
 		for (int i = numRows-1; i >= 0; --i) {
 			model.removeRow(i);
 		}
-		gatts.filters.clear();
+		gatts.pipeline.clear();
 	}
 
+	/**
+	 * Creates footer panel for the GUI
+	 * @return Footer awt panel
+	 */
 	public Panel createFooter() {
 		
 		Panel footer = new Panel();
 
 		JPanel footerPanel = new JPanel();
-		//footerPanel.setLayout(new GridLayout(3, 2, 0, 0));
 		footerPanel.setLayout(new GridLayout(2, 2, 0, 0));
 
-//		final JCheckBox virtualStack = new JCheckBox("Use Virtual Stack",
-//				useVirtualStack);
 		final JCheckBox virtualStack = new JCheckBox("Use Virtual Stack",
-				gatts.useVirtualStack);
+				useVirtualStack);
 		
 		final JTextField virtualTextField = new JTextField("");
 		virtualTextField.setText("");
 		virtualTextField.setEditable(false);
 		
-		
-		
-//		JCheckBox cod = new JCheckBox("Use Constant OpenCL Devices",
-//				chooseConstantDevices);
-//		JCheckBox cod = new JCheckBox("Use Constant OpenCL Devices",
-//				gatts.chooseConstantDevices);
-
-//		JSpinner spinner = new JSpinner(new SpinnerNumberModel(1, 1,
-//				inputDeviceLength, 1));
-		
-//		JSpinner spinner = new JSpinner(new SpinnerNumberModel(gatts.inputDeviceLength, 1,
-//				gatts.inputDeviceLength, 1));
-
-		
 		JCheckBox sis = new JCheckBox("Show Intermediate Steps", gatts.intermediateSteps);
 		sis.setEnabled(false);
-
-		JCheckBox ez = new JCheckBox("Enable Zorder", gatts.enableZorder);
-		ez.setEnabled(false);
 
 		virtualStack.addActionListener(new ActionListener() {
 			@Override
 			public void actionPerformed(ActionEvent e) {
-//				useVirtualStack = !useVirtualStack;
-//				virtualDirectory = null;
-				gatts.useVirtualStack = !gatts.useVirtualStack;
-				gatts.virtualDirectory = null;
+				useVirtualStack = !useVirtualStack;
+				virtualDirectory = null;
 				
-//				if(useVirtualStack) {
-				if(gatts.useVirtualStack) {
+				if(useVirtualStack) {
 					JFileChooser chooser = new JFileChooser(); 
 				    
 					chooser.setCurrentDirectory(new java.io.File("."));
@@ -286,12 +368,8 @@ public class PluginDialog
 				    chooser.setAcceptAllFileFilterUsed(false);
 				    
 				    if (chooser.showOpenDialog(null) == JFileChooser.APPROVE_OPTION) { 
-				      //System.out.println("getCurrentDirectory(): " +  chooser.getCurrentDirectory());
-				      //System.out.println("getSelectedFile() : " +  chooser.getSelectedFile());
-//				      virtualDirectory = chooser.getSelectedFile();
-//				      virtualTextField.setText(virtualDirectory.toString());
-				      gatts.virtualDirectory = chooser.getSelectedFile();
-				      virtualTextField.setText(gatts.virtualDirectory.toString());
+				      virtualDirectory = chooser.getSelectedFile();
+				      virtualTextField.setText(virtualDirectory.toString());
 				    }
 				    else {
 				    	//System.out.println("No Selection ");
@@ -305,31 +383,25 @@ public class PluginDialog
 		});
 		
 		
-
 		sis.addActionListener(new ActionListener() {
 			@Override
 			public void actionPerformed(ActionEvent e) {
 				gatts.intermediateSteps = !gatts.intermediateSteps;
 			}
 		});
-
-		ez.addActionListener(new ActionListener() {
-			@Override
-			public void actionPerformed(ActionEvent e) {
-				gatts.enableZorder = !gatts.enableZorder;
-				enableZorderChanged(gatts.enableZorder);
-			}
-		});
-		
+				
 		footerPanel.add(virtualStack);
 		footerPanel.add(virtualTextField);
 		footerPanel.add(sis);
-		footerPanel.add(ez);
 		footer.add(footerPanel);
 		
 		return footer;
 	}
 	
+	/**
+	 * Creates devices panel for the GUI
+	 * @return Devices awt panel
+	 */
 	public Panel createFooterDevices() {
 		Panel footerDevices = new Panel();
 		footerDevices.setLayout(new BorderLayout());
@@ -343,97 +415,284 @@ public class PluginDialog
 		return footerDevices;
 	}
 	
+	/**
+	 * Event method for preview image scrolling
+	 */
+	public synchronized void adjustmentValueChanged(AdjustmentEvent e) { 
+		int z = sliceSelector.getValue(); 
+        previewResult.setSlice(z); 
+        imageCanvas.setImageUpdated(); 
+        imageCanvas.repaint(); 
+    } 
+	
+	/**
+	 * Creating temporary images for previewing
+	 */
+	private void updatePreviewInput() {
+		String sSliceLabel = "";
+
+		ImageStack aux = activeInput.getStack();
+		ImageStack stack = null;
+				
+        if (activeInput.getWidth()>400 && activeInput.getHeight()>400) {
+        	stack = aux.crop(activeInput.getWidth()/2-200,activeInput.getHeight()/2-200,0,400,400,10);
+        } else if(activeInput.getWidth()>400 && activeInput.getHeight()<=400) {
+        	stack = aux.crop(activeInput.getWidth()/2-200,0,0,400,activeInput.getHeight(),10);
+        } else if(activeInput.getHeight()>400 && activeInput.getWidth()<=400) {
+        	stack = aux.crop(0,activeInput.getHeight()/2-200,0, activeInput.getWidth(),400,10);
+        } else {
+        	stack = aux.crop(0,0,0,activeInput.getWidth(),activeInput.getHeight(),10);
+        }
+        
+//        ColorModel cm = activeInput.createLut().getColorModel();
+//        ImageStack substack = new ImageStack(stack.getWidth(),
+//        									 stack.getHeight(),
+//                                             cm);   
+//        for(int n=1; n<=10; ++n) {
+//        	activeInput.setSlice(n);
+//        	
+//            sSliceLabel = stack.getSliceLabel(n);
+//            if (sSliceLabel !=null && sSliceLabel.length() < 1) {
+//            	sSliceLabel = "slice_"+String.valueOf(n);
+//            }
+//
+//            substack.addSlice(sSliceLabel,  activeInput.getProcessor().duplicate());
+//        }
+//        activeInput.setSlice(1);
+        
+        String sStackName = "PreviewInput";
+        
+        if (previewInput==null) 
+        	previewInput = new ImagePlus(sStackName, stack);
+        else
+        	previewInput.setStack(stack);
+        previewInput.setCalibration(activeInput.getCalibration());
+        
+		if (previewResult==null) {
+			previewResult = previewInput.duplicate();
+		    ImageProcessor previewResultProc = previewInput.getProcessor();
+		    previewResult.setProcessor(previewResultProc);
+		    previewResult.setTitle("PreviewResult");
+		} else {
+			previewResult.setStack(stack);
+		}
+	}
+	
+	/**
+	 * Creates right top panel for the GUI
+	 * @return Right top awt panel
+	 */
+	public Panel createPreviewerPanel() {
+		Panel preview = new Panel();
+
+		previewJPanel = new JPanel();
+		previewJPanel.setLayout(new BoxLayout(previewJPanel, BoxLayout.Y_AXIS));
+
+		//Create previewer
+		
+		activeInput = WindowManager.getImage((String) inputBox.getSelectedItem());
+
+		updatePreviewInput();
+		
+        
+		// The stack:
+        imageCanvas = new ImageCanvas(previewResult);
+        imageCanvas.setVisible(true);
+        previewJPanel.add(imageCanvas, BorderLayout.CENTER);
+
+        // The scrollbar
+        sliceSelector = new Scrollbar();
+        sliceSelector.setMinimum(1); 
+        sliceSelector.setMaximum(20);
+        sliceSelector.setOrientation(Scrollbar.HORIZONTAL); 
+        sliceSelector.setVisible(true);
+        sliceSelector.addAdjustmentListener(this);
+        previewJPanel.add(sliceSelector, BorderLayout.SOUTH); 
+		
+		previewb = new JButton("Preview");
+		previewb.setAlignmentX(Component.CENTER_ALIGNMENT);
+		previewJPanel.add(previewb, BorderLayout.CENTER);
+        
+		previewb.addActionListener(new ActionListener() {
+			@Override
+			public void actionPerformed(ActionEvent e) {
+				
+				if (gatts.pipeline.size() == 0) {
+					JOptionPane.showMessageDialog(null,
+		    				"Please add at least one filter to the pipeline! ", 
+		    				"Pipeline Error", JOptionPane.ERROR_MESSAGE);
+					return;
+				}
+				
+	            filter.run(previewInput.getProcessor(), e);
+	            imageCanvas.setImageUpdated(); 
+	            imageCanvas.repaint(); 
+			}
+		});
+        
+		preview.add(previewJPanel);
+
+		return preview;
+	}
+	
+	/**
+	 * Creates bottom panel of main window. For now this is empty and it is created 
+	 * just to adjust the position of OK and CANCEL buttons
+	 */
+	public Panel createBottomPanel() {
+		Panel bottom = new Panel();
+		bottom.setLayout(new BorderLayout());
+		Panel bottomJPanel = new Panel();
+		bottom.add(bottomJPanel);
+		return bottom;
+	}
+	
+	/**!
+	 * Run a macro command from string
+	 * @param macro - parsed from string
+	 * @return whether the operation was successful
+	 */
 	public boolean runMacro(String macro) {
 		return fromString(macro);
 	}
 	
+	/**
+	 * Run the main interface
+	 * @return whether the operation is to be accepted or canceled.
+	 */
 	public boolean runInterface() {
-		
-		
+			
         gatts.inputDeviceLength = maxNumDevices;
 		
 		gd.setLayout(new BoxLayout(gd, BoxLayout.Y_AXIS));
-		gd.add(createHeader());
-		gd.add(createWorkflow());
-		gd.add(createFooter());
-		selectedItemChanged(types[0]);
-		gd.add(createFooterDevices());
 		
+		gd.add(createTopPanel());
+		gd.add(createBottomPanel());
+				
 		selectedItemChangedInput();
-		
-		
+
+		// show the dialog
 		gd.showDialog();
 
 		if (gd.wasCanceled()) {
-			//System.out.println("gd was canceled...");
 			return false;
 		}
-
-		// / only ok was clicked, so take the current state
-		// / of the active filter and add it to the list..
-		if (gatts.filters.size() == 0) {
-			activeFilter.processFilterWindowComponent();
-			gatts.filters.add(activeFilter);
+				
+		/// only ok was clicked, so take the current state
+		/// of the active filter and add it to the list..
+		if (gatts.pipeline.size() == 0) {
+			JOptionPane.showMessageDialog(null,
+    				"Please add at least one filter to the pipeline! ", 
+    				"Pipeline Error", JOptionPane.ERROR_MESSAGE);
+			return false;
+		}
+		activeInput = WindowManager.getImage((String) inputBox.getSelectedItem());
+		
+		for (int i=0;i<devices.length;i++) {
+			gatts.maxSliceCount.set(i, (int) devicesSpList.get(i).getValue());
 		}
 		
-		
-
+	    /**
+	     * If requested, record the operation
+	    */
+	
 		if(Recorder.record) {
-			Recorder.recordOption("Options", toString());
+			Recorder.recordOption("Options", toJSONString());
 		}
+			
+		// Creating log file for monitoring
+		DateFormat dateFormat = new SimpleDateFormat("yyyy/MM/dd HH:mm:ss");
+		Date date = new Date();
+			
+		String devices_string = "";
+		for (int i=0;i<devices.length;i++) {
+			devices_string = devices_string+devices[i].getName()+"\n";
+		}
+			
+		monitor.setKeyValue("date", dateFormat.format(date));
+		monitor.setKeyValue("devices", devices_string);
+		monitor.setKeyValue("f3d.parameters", toString());
 		return true;
 	}
 	
+	/**
+	 * run the macro version of the library (no interface).
+	 * @return whether the operation was successful
+	 */
 	public boolean run() 
 	{
 		String macroOptions = Macro.getOptions();
 		
 		if(macroOptions != null) {
 			//System.out.println("Running macro...");
+			
+			// Creating log file for monitoring
+			DateFormat dateFormat = new SimpleDateFormat("yyyy/MM/dd HH:mm:ss");
+			Date date = new Date();
+			
+			String devices_string = "";
+			for (int i=0;i<devices.length;i++) {
+				devices_string = devices_string+devices[i].getName()+"\n";
+			}
+			
+			monitor.setKeyValue("date", dateFormat.format(date));
+			monitor.setKeyValue("devices", devices_string);
+			monitor.setKeyValue("f3d.parameters", macroOptions);
+			
 			return runMacro(macroOptions);
 		}
 		
 		return runInterface();
 	}
-
+	
+	/**!
+	 * Construct attributes from user input.
+	 * @return attributes to be used by F3D
+	 */
 	FilteringAttributes createAttributes() {
 		FilteringAttributes atts = new FilteringAttributes();
 
-		atts.inputImage = gatts.inputImage;
 		atts.intermediateSteps = gatts.intermediateSteps;
-		atts.enableZorder = gatts.enableZorder;
-		atts.useVirtualStack = gatts.useVirtualStack;
-		atts.virtualDirectory = gatts.virtualDirectory;
-		atts.filters = gatts.filters;
+		atts.pipeline = gatts.pipeline;
 		atts.chooseConstantDevices = gatts.chooseConstantDevices;
 		atts.inputDeviceLength = gatts.inputDeviceLength;
-		atts.maxSliceCount = gatts.maxSliceCount;
-		
+		atts.maxSliceCount = gatts.maxSliceCount;		
 		atts.overlap = gatts.overlap;
-		
 		return atts;
 	}
 
-	public JOCLFilter getChoiceIndex(String choice) {
+	/**
+	 * Gets the selected index
+	 * @param choice
+	 * @return JOCL Filter mapping to chosen index.
+	 */
+	protected JOCLFilter getChosenIndex(String choice) {
 
-		if (gatts.filterList.containsKey(choice)) {
-			return gatts.filterList.get(choice).newInstance();
+		if (filterList.containsKey(choice)) {
+			return filterList.get(choice).newInstance();
 		}
 
 		return null; // / convert this to None..
 	}
 
-	public void selectedItemChanged(String selectedItem) {
-		activeFilter = getChoiceIndex(selectedItem);
+	/**!
+	 * detection change in selection therefore the user interface
+	 * needs to be updated
+	 * @param selectedItem
+	 */
+	private void selectedItemChanged(String selectedItem) {
+		activeFilter = getChosenIndex(selectedItem);
 		filterPanel.removeAll();
 		filterPanel.add(activeFilter.getFilterWindowComponent());
 		gd.validate();
 		gd.repaint();
 	}
 	
-	public void selectedItemChangedInput() { //TODO Change this for inputImage component (changes every time input image changes)
-		activeInput = gatts.inputImage;
-		devicePanel .removeAll();
+	/**!
+	 * Create/Update the device window component based on selection.
+	 */
+	private void selectedItemChangedInput() { 
+		devicePanel.removeAll();
 		chosenDevices.clear();
 		chosenDevicesIdxs.clear();
 		devicePanel.add(getDeviceWindowComponent());
@@ -441,15 +700,17 @@ public class PluginDialog
 		gd.repaint();
 	}
 	
+	/**!
+	 * Update user interface based on selection.
+	 * @param state
+	 */
 	public void enableZorderChanged(boolean state) {
-		Zorder<Long> zorder = null;
 		int globalMemSize = 0;
-		int overlap = 0;
+		int maxOverlap = 0;
 		int maxSliceCount = 0;
-		int zOrderDepth = 0;
+		
 		gatts.overlap.clear();
 		gatts.maxSliceCount.clear();
-		gatts.zOrderDepth.clear();
 		
 		int[] dims = activeInput.getDimensions();
 
@@ -458,46 +719,22 @@ public class PluginDialog
         gatts.channels = dims[2];
         gatts.slices = dims[3];
 		
-        for(int i = 0; i < gatts.filters.size(); ++i)
+        for(int i = 0; i < gatts.pipeline.size(); ++i)
         {
-            JOCLFilter filter = gatts.filters.get(i);
-            overlap = Math.max(overlap, filter.overlapAmount());
-        }
-
-//        System.out.println("overlap: " + overlap);
-        
-        if(state) {
-            zorder = new Zorder<Long>();
+            JOCLFilter filter = gatts.pipeline.get(i);
+            maxOverlap = Math.max(maxOverlap, filter.getInfo().overlapZ);
         }
         
         for (int i=0;i<devices.length;i++) {
-//        	System.out.println("i: " +i);
-        	if(!state) {
-	
-				globalMemSize = (int) Math.min(devices[i].getMaxMemAllocSize()*.8, Integer.MAX_VALUE >> 1);
-								
-				if(devices[i].getType().equals("CPU")) {
-		            globalMemSize = (int) Math.min(globalMemSize, 10*1024*1024); /// process 100MB at a time
-		        }
-				
-				maxSliceCount = (int)(((double)globalMemSize / ((double)gatts.width*gatts.height)));
+        	globalMemSize = (int) Math.min(devices[i].getMaxMemAllocSize()*.5, Integer.MAX_VALUE >> 1);
 
-						
-	        }
-	        else 
-	        {
-	            ///now allocate memory for Zorder memory on GPU..
-	            //System.out.println("-->" + atts.width + " " + atts.height + " " + atts.slices);
-	
-	            gatts.zOrderWidth = zorder.zoRoundUpPowerOfTwo(gatts.width);
-	            gatts.zOrderHeight = zorder.zoRoundUpPowerOfTwo(gatts.height);
-	            
-	            maxSliceCount = (int)(((double)globalMemSize / ((double)gatts.zOrderWidth*gatts.zOrderHeight)));
-	            zOrderDepth = zorder.zoRoundUpPowerOfTwo(maxSliceCount);
-	            
-	        } 
-	
-	        maxSliceCount -= overlap; 
+        	if(devices[i].getType().equals("CPU")) {
+        		globalMemSize = (int) Math.min(globalMemSize, 10*1024*1024); /// process 100MB at a time
+        	}
+
+        	maxSliceCount = (int)(((double)globalMemSize / ((double)gatts.width*gatts.height)));
+        
+	        maxSliceCount -= maxOverlap; 
 	        
 	        if(maxSliceCount <= 0){
 	            //System.out.println("Image + StructureElement will not fit on GPU memory");
@@ -507,25 +744,21 @@ public class PluginDialog
 	        /// if the maximum slices are greater than available slices then
 	        /// clamp to slices
 	        if(maxSliceCount > gatts.slices) {
-	            //System.out.println("Max slice count : " + atts.maxSliceCount + " " + atts.slices + " " + atts.overlap);
 	            maxSliceCount = gatts.slices;
 	            //atts.maxSliceCount = -1;
-	            overlap = 0;
+	            maxOverlap = 0;
 	        }
 	        
-	        if (state){
-	        	zOrderDepth = zorder.zoRoundUpPowerOfTwo(maxSliceCount + overlap);
-	        }
-	        
-//	        System.out.println("Overlap: " + overlap + ", maxSliceCount: " + maxSliceCount + ", zOrderDepth: " + zOrderDepth);
-	        
-	        gatts.overlap.add(overlap);
+	        gatts.overlap.add(maxOverlap);
 			gatts.maxSliceCount.add(maxSliceCount);
-			gatts.zOrderDepth.add(zOrderDepth);
-	        
         }
 	}
 	
+	/**!
+	 * Create dynamic interface to list of available OpenCL 
+	 * accelerators.
+	 * @return user interface component.
+	 */
 	public Component getDeviceWindowComponent() {
 		JPanel panel = new JPanel();
 		panel.setLayout(new GridLayout(2+devices.length, 2, 0, 0));
@@ -533,7 +766,7 @@ public class PluginDialog
 		PluginDialogButtonGroup devicesCbGroup = new PluginDialogButtonGroup();
 			
 		final ArrayList<JCheckBox> devicesCbList = new ArrayList<JCheckBox>();
-		final ArrayList<JSpinner> devicesSpList = new ArrayList<JSpinner>();
+		devicesSpList = new ArrayList<JSpinner>();
 		
 		JLabel devicesLabel = new JLabel("Devices Options");
 		JLabel numdevicesLabel = new JLabel("Total number of devices: " + maxNumDevices);
@@ -547,8 +780,6 @@ public class PluginDialog
 			
 			final JCheckBox cb = new JCheckBox("Device " + i + " (" + devices[i].getName() + ")",false);
 			
-//			System.out.println(gatts.maxSliceCount.get(i));
-			
 			final JSpinner js = new JSpinner(new SpinnerNumberModel((int)gatts.maxSliceCount.get(i),1,(int)gatts.maxSliceCount.get(i),1));
 			js.setEnabled(false);
 			
@@ -557,7 +788,6 @@ public class PluginDialog
 				public void stateChanged(ChangeEvent e) {
 					int index = devicesSpList.indexOf(js);
 					gatts.maxSliceCount.set(index, (Integer) ((JSpinner) e.getSource()).getValue());
-					//System.out.println("MaxSliceCount: " + gatts.maxSliceCount);
 				}
 			});
 			
@@ -568,13 +798,10 @@ public class PluginDialog
 					if (e.getStateChange()==ItemEvent.SELECTED) {
 						chosenDevices.add(devices[devicesCbList.indexOf(cb)]);
 						chosenDevicesIdxs.add(devicesCbList.indexOf(cb));
-						//System.out.println("Added device index: " + devicesCbList.indexOf(cb));
 					} else {
 						chosenDevices.remove(devices[devicesCbList.indexOf(cb)]);
 						chosenDevicesIdxs.remove((Integer)devicesCbList.indexOf(cb));
-						//System.out.println("Removed device index: " + devicesCbList.indexOf(cb));
 					}
-					//System.out.println("Temporary number of devices: " + chosenDevices.size());
 				}
 			});
 			
@@ -589,43 +816,23 @@ public class PluginDialog
 		
 		devicesCbGroup.addAll(devicesCbList);
 		
-		
-//		spinner.addChangeListener(new ChangeListener() {
-//		@Override
-//		public void stateChanged(ChangeEvent e) {
-//	//		inputDeviceLength = (Integer) ((JSpinner) e.getSource())
-//	//				.getValue();
-//			gatts.inputDeviceLength = (Integer) ((JSpinner) e.getSource())
-//					.getValue();
-//		}
-//		});
-//	
-//		cod.addActionListener(new ActionListener() {
-//			@Override
-//			public void actionPerformed(ActionEvent e) {
-//	//			chooseConstantDevices = !chooseConstantDevices;
-//				gatts.chooseConstantDevices = !gatts.chooseConstantDevices;
-//			}
-//		});
-//
-//		footerPanel.add(cod);
-//		footerPanel.add(spinner);
-//	
-		
 		return panel;
 	}
 	
-		
-	public String toString() {
+	/**!
+	 * Serialize to JSON string.	
+	 * @return serialized string
+	 */
+	public String toJSONString() {
 		int i;
 		String result = "";
 		
 		String filters = "[";
 		
-		for(i = 0; i < gatts.filters.size(); ++i) {
-			filters += gatts.filters.get(i).toString();
+		for(i = 0; i < gatts.pipeline.size(); ++i) {
+			filters += gatts.pipeline.get(i).toJSONString();
 			
-			if(i != gatts.filters.size()-1)
+			if(i != gatts.pipeline.size()-1)
 				filters += ",";
 		}
 		filters += "]";
@@ -640,24 +847,27 @@ public class PluginDialog
 		}
 		devices += "]";
 		
-		String virtualPath = gatts.virtualDirectory != null ?  gatts.virtualDirectory.getAbsolutePath() : "empty" ;
+		String virtualPath = virtualDirectory != null ?  virtualDirectory.getAbsolutePath() : "empty" ;
 		
 		result = "{"
-				+ "input : " + gatts.inputImage.getTitle() + " , "
+				+ "input : " + activeInput.getTitle() + " , "
 				+ "intermediateSteps : "+ gatts.intermediateSteps + " , "
-				+ "enableZorder : " + gatts.enableZorder + " , "
 				//+ "chooseConstantDevices : " + gatts.chooseConstantDevices + " , "
 				//+ "inputDevices : " + gatts.inputDeviceLength + " , "
 				+ "devices : " + devices + " , "
-				+ "useVirtualStack : " + gatts.useVirtualStack + " , "
+				+ "useVirtualStack : " + useVirtualStack + " , "
 				+ "virtualDirectory : " + virtualPath + " , "
 				+ "filters : " + filters.replace("\"","")
 				+ "}";
 		return result;
 	}
 	
+	/**!
+	 * Deserialize from JSON string
+	 * @param str - input string
+	 * @return whether deserialization was successful.
+	 */
 	public boolean fromString(String str) {
-		//boolean result = false;
 		int i;
 		boolean result = true;
 		JSONParser parser = new JSONParser();
@@ -676,7 +886,6 @@ public class PluginDialog
 		}
 		
 		///the rest should be JSON compliant 
-//		System.out.println(command);
 		
 		// Remove all white spaces from command
 		command = command.replaceAll("\\s", "");
@@ -694,68 +903,45 @@ public class PluginDialog
 		// Insert double quotes as needed for JSON
 		command = command.replaceAll("(\\w+)[\\:]((\\/*\\w+(\\-|\\.|\\/))*\\w+)", "\"$1\" : \"$2\"");
 		
-//		System.out.println(command);
-
 		try {
 			 
 			Object obj = parser.parse(command);
 	 
 			JSONObject jsonObject = (JSONObject) obj;
 			String imageName = (String) jsonObject.get("input");
-			gatts.inputImage = WindowManager.getImage(imageName);
-			activeInput = gatts.inputImage;
-			//System.out.println("input: "+gatts.inputImage.getTitle());
+			activeInput = WindowManager.getImage(imageName); //gatts.inputImage;
 			gatts.intermediateSteps = Boolean.valueOf((String)jsonObject.get("intermediateSteps"));
-			//System.out.println("intermediateSteps: "+gatts.intermediateSteps);
-			gatts.enableZorder = Boolean.valueOf((String)jsonObject.get("enableZorder"));
-			//System.out.println("enableZorder: "+gatts.enableZorder);
-			gatts.useVirtualStack = Boolean.valueOf((String)jsonObject.get("useVirtualStack"));
-			//System.out.println("useVirtualStack: "+gatts.useVirtualStack);
-			if (gatts.useVirtualStack) {
+			useVirtualStack = Boolean.valueOf((String)jsonObject.get("useVirtualStack"));
+			if (useVirtualStack) {
 				if (jsonObject.get("virtualDirectory")==null) {
 					System.out.println("virtualDirectory is empty!");
 					return false;
 				} else {
-					gatts.virtualDirectory = new File((String)jsonObject.get("virtualDirectory"));
-					if (!gatts.virtualDirectory.exists() || gatts.virtualDirectory.getAbsolutePath()=="empty") {
+					virtualDirectory = new File((String)jsonObject.get("virtualDirectory"));
+					if (!virtualDirectory.exists() || virtualDirectory.getAbsolutePath()=="empty") {
 						System.out.println("virtualDirectory does not exist!");
 						return false;
 					} else {
-						//System.out.println("virtualDirectory: "+gatts.virtualDirectory.getAbsolutePath());
+
 					}
 				}
 			}
 					
 			JSONArray filterArray = (JSONArray) jsonObject.get("filters");
-			//System.out.println("Filters: "+filterArray.toString());
 			
 			for (i=0;i<filterArray.size();i++) {
 			
 				JSONObject jsonFilterObject = (JSONObject) filterArray.get(i);
 				String filterName = (String) jsonFilterObject.get("Name");
-				//System.out.println("Filter name: "+filterName);
-				activeFilter = getChoiceIndex(filterName);
-				//System.out.println("Mask: "+jsonFilterObject.get("Mask"));
-				activeFilter.fromString(jsonFilterObject.toString());
+				activeFilter = getChosenIndex(filterName);
+				activeFilter.fromJSONString(jsonFilterObject.toString());
 				activeFilter.processFilterWindowComponent();
-				gatts.filters.add(activeFilter);
+				gatts.pipeline.add(activeFilter);
 			}
-	
-//			gatts.inputDeviceLength = Integer.valueOf((String)jsonObject.get("inputDevices"));
-//			System.out.println("inputDevices: "+gatts.inputDeviceLength);
-//			gatts.chooseConstantDevices = Boolean.valueOf((String)jsonObject.get("chooseConstantDevices"));
-//			System.out.println("chooseConstantDevices: "+gatts.chooseConstantDevices);
-//			
-//			if (gatts.chooseConstantDevices == true &&
-//					gatts.inputDeviceLength < 0 && gatts.inputDeviceLength > maxNumDevices) {
-//				System.out.println("Wrong number of devices!");
-//				return false;
-//			}
-			
+				
 			enableZorderChanged(false);
 					
 			JSONArray deviceArray = (JSONArray) jsonObject.get("devices");
-			//System.out.println("Devices: "+deviceArray.toString());
 			int deviceIndex;
 			int MaxNumSlices;
 			for (i=0;i<deviceArray.size();i++) {
@@ -766,14 +952,12 @@ public class PluginDialog
 					return false;
 				} else 
 					chosenDevicesIdxs.add(deviceIndex);
-				//System.out.println("Device index: " + chosenDevicesIdxs.get(i));
 				MaxNumSlices = Integer.valueOf((String)jsonDeviceObject.get("MaxNumSlices"));
 				if (MaxNumSlices > gatts.maxSliceCount.get(i)+gatts.overlap.get(i)) {
 					System.out.println("Incorrect number of slices!");
 					return false;
 				} else 
 					gatts.maxSliceCount.set(i,MaxNumSlices);
-				//System.out.println("MaxNumSlices: " + gatts.maxSliceCount.get(i));
 				chosenDevices.add(devices[chosenDevicesIdxs.get(i)]);
 			}
 			
@@ -784,4 +968,6 @@ public class PluginDialog
 				
 		return result;
 	}
+
+	
 }
