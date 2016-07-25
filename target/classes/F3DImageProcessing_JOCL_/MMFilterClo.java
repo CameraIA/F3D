@@ -1,52 +1,81 @@
 package F3DImageProcessing_JOCL_;
 
-import static com.jogamp.opencl.CLMemory.Mem.READ_WRITE;
 import static java.lang.System.nanoTime;
 import static java.lang.System.out;
-import ij.IJ;
 import ij.ImageStack;
 
 import java.awt.Component;
 import java.nio.ByteBuffer;
 
 import F3DImageProcessing_JOCL_.MMFilterClo;
-
 import com.jogamp.opencl.CLBuffer;
 
 import javax.swing.JPanel;
 
-//Closing
-class MMFilterClo implements JOCLFilter
+/**!
+ * Implementation of the Closing operation.
+ * This is implemented with a combination of executing the Dilation Kernel then an Erosion Kernel.
+ * @author hari
+ *
+ */
+class MMFilterClo extends JOCLFilter
 {	
-	int index;
-	FilteringAttributes.FilterPanel filterPanel =
-			new FilteringAttributes.FilterPanel();
-	
+	/**!
+	 * Create new instance of the filter.
+	 */
 	@Override
     public JOCLFilter newInstance() {
 		return new MMFilterClo();
 	}
 	
-	public String toString() {
+	/**!
+	 * Serialize to JSON format string
+	 * @return JSON string
+	 */
+	public String toJSONString() {
 		String result = "{ "
 				+ "\"Name\" : \"" + getName() + "\" , "
-				+ "\"Mask\" : " + filterPanel.toString()  
+				+ "\"Mask\" : " + filterPanel.toJSONString()  
 				+ " }";
 			return result;
 	}
 	
-	public void fromString(String str) {
-		filterPanel.fromString(str);
+	/**!
+	 * DeSerialize from JSON format string
+	 */
+	public void fromJSONString(String str) {
+		filterPanel.fromJSONString(str);
 	}
+	/**!
+	 * Get information about this filter. 
+	 * Information includes name, storage type, 3D overlap.
+	 */
+	@Override
+    public FilterInfo getInfo()
+    {
+		FilterInfo info = new FilterInfo();
+		info.name = getName();
+		info.memtype = JOCLFilter.Type.Byte;
+		info.useTempBuffer = true;
+		///TODO: return X and Y..
+		info.overlapX = info.overlapY = info.overlapZ = overlapAmount();
+		return info;
+    }
 	
-    @Override
+	/**!
+	 * Name of the filter. Used in GUI.
+	 */
     public String getName()
     {
         return "MMFilterClo";
     }
 
-    @Override
-    public int overlapAmount() {
+    /**!
+     * Compute amount of overlap. This depends on which masks were selected
+     * and the size of mask.
+     * @return size of overlapAmount
+     */
+    private int overlapAmount() {
     	int overlapAmount = 0;
     	
     	for(int i = 0; i < filterPanel.maskImages.size(); ++i)
@@ -56,46 +85,38 @@ class MMFilterClo implements JOCLFilter
         return overlapAmount;
     }
 
-	@Override
-	public int getDimensions()
-	{
-		return 2;
-	}
-
-    CLAttributes clattr = null;
-    FilteringAttributes atts = null;
-
-    @Override
-    public void setAttributes(CLAttributes c, FilteringAttributes a, int idx)
-    {
-        clattr = c;
-        atts = a;
-        index = idx;
-    }
-
     MMFilterEro erosion;
     MMFilterDil dilation;
 
+    /**!
+     * Set up the filters needed for a close operation.
+     */
     @Override
     public boolean loadKernel()
     {
-        if(clattr.outputTmpBuffer == null)
-		    clattr.outputTmpBuffer = clattr.context.createByteBuffer(clattr.inputBuffer.getBuffer().capacity(), READ_WRITE);
-        
-        erosion = new MMFilterEro();
+    	erosion = new MMFilterEro();
         dilation = new MMFilterDil();
 
-        erosion.setAttributes(clattr, atts, index);
-        erosion.loadKernel();
+        erosion.setAttributes(clattr, atts, monitor, index);
+        if (!erosion.loadKernel())
+        	return false;
         
-        dilation.setAttributes(clattr, atts, index);      
-        dilation.loadKernel();    
+        dilation.setAttributes(clattr, atts, monitor, index);      
+        if (!dilation.loadKernel())
+        	return false;    
         return true;
     }
 
+    /**!
+     * Run the Filter. Which involves invoking the dilation filter followed
+     * by an erosion filter.
+     */
 	@Override
 	public boolean runFilter()
 	{
+		/**!
+		 * Ensure masks fall within a safe maximum.
+		 */
         for(int i = 0; i < filterPanel.maskImages.size(); ++i) {
             ImageStack mask = filterPanel.maskImages.get(i);
 
@@ -109,17 +130,31 @@ class MMFilterClo implements JOCLFilter
 
 		long time = nanoTime();
 
+		/**!
+		 * Ensure data is available on the GPU.
+		 */
 	    clattr.queue.putWriteBuffer(clattr.inputBuffer, false);
         clattr.queue.finish();
-		
-        dilation.runKernel(filterPanel.maskImages);
+
+        /**!
+         * run dilation kernel
+         */
+        if (!dilation.runKernel(filterPanel.maskImages, overlapAmount()))
+        	return false;
 
 		//swap input and output..
+        /**!
+         * Swap results to make output back to input.
+         */
         CLBuffer<ByteBuffer> tmpBuffer = clattr.inputBuffer;
         clattr.inputBuffer = clattr.outputBuffer;
         clattr.outputBuffer = tmpBuffer;
         
-        erosion.runKernel(filterPanel.maskImages);
+        /**!
+         * run erosion kernel
+         */
+        if (!erosion.runKernel(filterPanel.maskImages, overlapAmount()))
+        	return false;
         		
         clattr.queue.putReadBuffer(clattr.outputBuffer, false);
         clattr.queue.finish();
@@ -133,6 +168,9 @@ class MMFilterClo implements JOCLFilter
 		return true;
 	}
 
+	/**!
+	 * Release filter resources.
+	 */
     @Override
     public boolean releaseKernel() {
         erosion.releaseKernel();
@@ -141,6 +179,9 @@ class MMFilterClo implements JOCLFilter
         return true;
     }
 
+    /**!
+     * Create custom user interface.
+     */
 	@Override
 	public Component getFilterWindowComponent()	{
 		JPanel panel = new JPanel();
@@ -148,8 +189,12 @@ class MMFilterClo implements JOCLFilter
 		return panel;
 	}
 
+	/**!
+	 * Process any information for selection of the interface.
+	 */
 	@Override
 	public void processFilterWindowComponent() {
 		filterPanel.processFilterWindowComponent();
 	}
+
 }

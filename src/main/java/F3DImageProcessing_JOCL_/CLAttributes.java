@@ -1,7 +1,7 @@
 package F3DImageProcessing_JOCL_;
 
 import java.nio.ByteBuffer;
-
+import java.nio.FloatBuffer;
 import com.jogamp.opencl.CLBuffer;
 import com.jogamp.opencl.CLCommandQueue;
 import com.jogamp.opencl.CLContext;
@@ -14,29 +14,106 @@ import ij.ImageStack;
 import ij.process.ByteProcessor;
 import ij.process.ImageProcessor;
 
+/**!
+ * Class to hold OpenCL output and buffers associated with a particular device and queue.
+ * @author hari
+ * @author tperciano
+ *
+ */
 class CLAttributes {
-    public int rank = 0;
-    public int minWorkGroup = 256;
-    public int[] globalSize = null;
-    public int[] localSize = null;
-	//public int totalSize = 0;
-	public CLContext context = null;
-	public CLDevice device = null;
-	public CLCommandQueue queue = null;
+	public CLContext context = null; /// OpenCL context
+	public CLDevice device = null;  /// OpenCL device
+	public CLCommandQueue queue = null; ///Queue for OpenCL device.
+
+	///TODO: Replace this with a Buffer manager.
 	public CLBuffer<ByteBuffer> inputBuffer = null;
     public CLBuffer<ByteBuffer> outputBuffer = null;
     public CLBuffer<ByteBuffer> outputTmpBuffer = null;
-
-    public Zorder<Long> zorder = null; //new Zorder<Long>();
-
-    boolean initializeData(int dimensions, ImagePlus image, FilteringAttributes atts, int overlapAmount, int maxSliceCount) 
+   
+    /**!
+     * Helper function to round to nearest buffer that aligns with groupSize.
+     * @param groupSize - The size of each group
+     * @param globalSize - The current size of the buffer.
+     * @return new size
+     */
+    public int roundUp(int groupSize, int globalSize) {
+		int r = globalSize % groupSize;
+		if (r == 0) {
+			return globalSize;
+		} else {
+			return globalSize + groupSize - r;
+		}
+	}
+    
+    /**
+     * Calculates working group sizes
+     * @param  localSize   Working group size (local)
+     * @param  globalSize  Working group size (global)
+     * @param  sizes       Dimensions
+     * @return             Returns false if an error occurred
+     */
+    boolean computeWorkingGroupSize(int[] localSize, int[] globalSize, int[] sizes)
     {
+    	if(localSize == null || globalSize == null || sizes == null) {
+    		return false;
+    	}
 
+    	/**!
+    	 * Allocate 1D or 2D working groups. Set sizes based on 3D array.
+    	 */
+    	if(localSize.length <= 0 || localSize.length > 2 ||
+    	   globalSize.length <= 0 || globalSize.length > 2 ||
+    	   sizes.length != 3) {
+    		return false;
+    	}
+    	
+    	String deviceType = device.getType().toString();
+    	
+    	/**!
+    	 * Set working group sizes
+    	 */
+    	int dimensions = globalSize.length;
+    	//atts.width*atts.height*(maxSliceCount + overlapAmount)
+    	if(dimensions == 1)
+    	{
+    		localSize[0] = device.getMaxWorkGroupSize();
+    		globalSize[0] = roundUp(localSize[0], sizes[0]*sizes[1]*sizes[2]);
+    	}
+    	else if(dimensions == 2)
+    	{
+    		localSize[0] = Math.min((int)Math.sqrt(device.getMaxWorkGroupSize()), 16);
+    		globalSize[0] = roundUp(localSize[0], sizes[0]);
+
+    		localSize[1] = Math.min((int)Math.sqrt(device.getMaxWorkGroupSize()), 16);
+    		globalSize[1] = roundUp(localSize[1], sizes[1]);
+    	}
+    	
+    	/// only use on process if you are CPU?
+    	/// TODO: test this case (if CPU still fails)
+    	if(deviceType.equals("CPU")) {
+    		for(int i = 0; i < dimensions; ++i) {
+    			globalSize[i] *= localSize[i];
+    			localSize[i] = 1;
+    		}
+    	}
+
+    	return true;
+    }
+
+    /**
+     * Initializes data for execution
+     * @param  image         Input image      
+     * @param  atts          Filtering attributed
+     * @param  overlapAmount Size of overlap
+     * @param  maxSliceCount Number of image slices to be executed
+     * @return               Returns false if an error occurred
+     */
+    boolean initializeData(ImagePlus image, FilteringAttributes atts, 
+    						int overlapAmount, int maxSliceCount) 
+    {
         String deviceType = device.getType().toString();
-        int globalMemSize = (int) Math.min(device.getMaxMemAllocSize()*.8, Integer.MAX_VALUE >> 1);
-		//int globalMemSize = (int) Math.min(device.getMaxMemAllocSize()*.1, Integer.MAX_VALUE >> 1); Hari version
+        int globalMemSize = (int) Math.min(device.getMaxMemAllocSize()*.4, Integer.MAX_VALUE >> 1);
 
-        
         int[] dims = image.getDimensions();
 
         atts.width = dims[0];
@@ -44,235 +121,154 @@ class CLAttributes {
         atts.channels = dims[2];
         atts.slices = dims[3];
 
+        atts.sliceStart = -1;
+        atts.sliceEnd = -1;
+        
         if(deviceType.equals("CPU")) {
             globalMemSize = (int) Math.min(globalMemSize, 10*1024*1024); /// process 100MB at a time
-            minWorkGroup = 64;
         }
 
-        if(atts.enableZorder) {
-            zorder = new Zorder<Long>();
-        }
-
-        //System.out.println("-->" + globalMemSize + " " + atts.width + " " + atts.height + " " + atts.slices);
-
-        if(!atts.enableZorder) {
-            //atts.maxSliceCount = (int)(((double)globalMemSize / ((double)atts.width*atts.height)));
-        }
-        else 
-        {
-            ///now allocate memory for Zorder memory on GPU..
-//            System.out.println("-->" + atts.width + " " + atts.height + " " + atts.slices);
-
-            atts.zOrderWidth = zorder.zoRoundUpPowerOfTwo(atts.width);
-            atts.zOrderHeight = zorder.zoRoundUpPowerOfTwo(atts.height);
-            
-            //atts.maxSliceCount = (int)(((double)globalMemSize / ((double)atts.zOrderWidth*atts.zOrderHeight)));
-            //atts.zOrderDepth = zorder.zoRoundUpPowerOfTwo(atts.maxSliceCount);                                
-        } 
 
         //atts.maxSliceCount -= overlapAmount; 
         //atts.overlap = overlapAmount;
         
+        ///Return if the device cannot hold any slices.
         if(maxSliceCount <= 0){
             System.out.println("Image + StructureElement will not fit on GPU memory");
             return false;
         }            
-    
-        /// if the maximum slices are greater than available slices then
-        /// clamp to slices
-//        if(atts.maxSliceCount > atts.slices) {
-//            System.out.println("Max slice count : " + atts.maxSliceCount + " " + atts.slices + " " + atts.overlap);
-//            atts.maxSliceCount = atts.slices;
-//            //atts.maxSliceCount = -1;
-//            atts.overlap = 0;
-//        }
 
-        if(atts.enableZorder) 
-        {
-            //atts.zOrderDepth = zorder.zoRoundUpPowerOfTwo(maxSliceCount + overlapAmount);
-            //System.out.println("-->" + atts.zOrderWidth + " " + atts.zOrderHeight + " " + atts.zOrderDepth);
-            ///now allocate memory for Zorder memory on GPU..
-            zorder.zoInitZOrderIndexing(atts.width, atts.height, maxSliceCount + overlapAmount, context);
-        }            
-//        System.out.println("Overlap: " + maxSliceCount + " " + overlapAmount);
-
-        /// Initialize buffers..
-    
-        int totalSize = 0;
-
-        globalSize = new int [dimensions];
-        localSize = new int [dimensions];
-
-        if(dimensions == 2)
-        {
-            localSize[0] = Math.min((int)Math.sqrt(device.getMaxWorkGroupSize()), 16);
-            globalSize[0] = atts.roundUp(localSize[0], atts.width);
-
-            localSize[1] = Math.min((int)Math.sqrt(device.getMaxWorkGroupSize()), 16);
-            globalSize[1] = atts.roundUp(localSize[1], atts.height);
-        }
-        else
-        {
-            localSize[0] = device.getMaxWorkGroupSize();
-            globalSize[0] = atts.roundUp(localSize[0], atts.width*atts.height*(maxSliceCount + overlapAmount));
-        }
-
-        /// only use on process if you are CPU?
-        if(deviceType.equals("CPU")) {
-            for(int i = 0; i < dimensions; ++i) {
-               globalSize[i] *= localSize[i];
-               localSize[i] = 1;
-            }
-        }
-
-        if(atts.enableZorder){
-            totalSize = zorder.zoGetIndexZOrder(atts.width-1, atts.height-1, (maxSliceCount + overlapAmount)-1)+1;
-        }        
-        else {
-            totalSize = atts.width*atts.height*(maxSliceCount + overlapAmount);
-        }
-
-//        System.out.println(atts.width + " " + atts.height + " " + maxSliceCount + " " + overlapAmount + " totalSize: " + totalSize);
-        
+        /**!
+         * Compute total size based on Z direction 
+         * given width, height and maximumSlice and amount of overlap
+         */
+        int totalSize = atts.width*atts.height*(maxSliceCount + (overlapAmount*2));
+ 
+        /**!
+         * create OpenCL buffers.
+         */
         inputBuffer = context.createByteBuffer(totalSize, READ_WRITE); 
         outputBuffer = context.createByteBuffer(totalSize, READ_WRITE); 
-
-        //out.println("device bytes: " + (int)((double)globalMemSize/(1024.0*1000.0)) 
-        //+ " " + atts.maxSliceCount  + " " + 
-        //(int)((atts.maxSliceCount*atts.width*atts.height)/(1024.0*1000.0)));
-        atts.sliceStart = -1;
-        atts.sliceEnd = -1;
-
+        
         return true;
     }
     
+    
+    /**!
+     * Loads data between startRange and endRange slices from stack into device. 
+     * The overlap includes pad that allows the next filter to execute properly. 
+     * @param stack      Image stack
+     * @param atts       Filtering attributes
+     * @param startRange Slice index to start
+     * @param endRange   Slice index to end
+     * @param overlap    Overlap size
+     * @return           Returns false if an error occurred
+     */
     boolean loadNextData(ImageStack stack, FilteringAttributes atts, int startRange, int endRange, int overlap)
     {
 
+    	/**!
+    	 * minindex starts at the minimum slice index needed to successfully run the kernel.
+    	 * maxindex ends with the maximum slice index needed to successfully run the kernel
+    	 */
         int minIndex = Math.max(0, startRange-overlap);
         int maxIndex = Math.min(atts.slices, endRange+overlap);
-        
-//        System.out.println("Load minIndex: " + minIndex + " " + "maxIndex: " + maxIndex);
-        
-        /*if(atts.sliceEnd >= atts.slices)
-            return false;
-
-        if(atts.sliceStart == -1) {
-            atts.sliceStart = 0;
-            atts.sliceEnd = atts.maxSliceCount;
-        }
-        else {
-            atts.sliceStart = atts.sliceEnd;
-            atts.sliceEnd += atts.maxSliceCount;
-        }
-
-        if(atts.sliceEnd > atts.slices) {
-            atts.maxSliceCount -= (atts.sliceEnd - atts.slices);
-            atts.sliceEnd = atts.slices;
-        }
-        
-        int overlap = (int) (atts.overlap/2);
-
-        int minIndex = Math.max(0, atts.sliceStart - overlap);
-        int maxIndex = Math.min(atts.sliceEnd + overlap, atts.slices);
-
-        System.out.println("start: " + minIndex + 
-                           " end: " + maxIndex + 
-                           " for slices at start: " + atts.sliceStart + 
-                           " end: " + atts.sliceEnd + 
-                           " maxSlices: " + atts.maxSliceCount + 
-                           " total: " + atts.slices + " " + atts.overlap);*/
-
-        
+       
         /// load data..
+        
         ByteBuffer buffer = (ByteBuffer)inputBuffer.getBuffer();
 
         buffer.position(0);
-        
+                
         for(int i = minIndex;  i < maxIndex; ++i)
         {
             //ByteProcessor prc  = (ByteProcessor) stack.getProcessor(i+1);
-			ByteProcessor prc  = (ByteProcessor) stack.getProcessor(i+1).convertToByteProcessor(); //Hari version
-            
-            if(!atts.enableZorder) 
-                buffer.put((byte[])prc.getPixels());            
-            else {
-            	byte[] pixels = (byte[])prc.getPixels();
-                int l = 0;        
-                for(int j = 0; j < atts.height; ++j)
-                {
-                    for(int k = 0; k < atts.width; ++k)
-                    {    
-                        if(buffer.capacity() <= zorder.zoGetIndexZOrder(k,j,i)) 
-                            System.out.println("Greater: " + k + " " + j + " " + i + " " + zorder.zoGetIndexZOrder(k,j,i));
-                        buffer.put(zorder.zoGetIndexZOrder(k,j,i),pixels[l]);
-                        l++;
-                    }
-                }
-            }
+        	///The following code implicitly converts between any type to BYTE type
+        	///TODO: Fix so that any type of kernels handled..
+			ByteProcessor prc  = (ByteProcessor) stack.getProcessor(i+1).convertToByteProcessor();
+            buffer.put((byte[])prc.getPixels());            
         }
 
+        ///rewind buffer position back to zero.
         buffer.position(0);
 
-        //System.out.println("Loaded! minIndex: " + minIndex + " " + "maxIndex: " + maxIndex);
-        
         return true;
     }
 
+    /**
+     * Writes data between startRange and endRange slices fron device into stack
+     * @param imagestack - Output imagestack
+     * @param atts - attributes of the pipeline
+     * @param startRange - start range within index stack
+     * @param endRange - end range within index stack.
+     * @param overlap - amount of overlap that is present
+     */
     void writeNextData(ImageStack imagestack, FilteringAttributes atts, int startRange, int endRange, int overlap) 
     {
-        int minIndex = startRange == 0 ? 0 : overlap;
-        int maxIndex = (endRange-startRange);
+    	/**!
+    	 * Since the incoming index is padded with overlap,
+    	 * remove the padding to get only the slices of interest.
+    	 * minIndex should start past overlap, unless it is at 0
+    	 * maxIndex
+    	 */        
+        int startIndex = startRange == 0 ? 0 : overlap;
+        int length = endRange-startRange;
         
-//        System.out.println("Write minIndex: " + minIndex + " " + "maxIndex: " + maxIndex);
-
-        if(minIndex != 0)
-            maxIndex += 1;
-
         ByteBuffer buffer = (ByteBuffer) outputBuffer.getBuffer();
 
-        if(atts.enableZorder)
-            buffer.position(minIndex*atts.zOrderWidth*atts.zOrderHeight);
-        else
-            buffer.position(minIndex*atts.width*atts.height);
+        buffer.position(startIndex*atts.width*atts.height);
 
-        for(int i = minIndex; i < maxIndex; ++i)
+        for(int i = 0; i < length; ++i)
         {
             ByteProcessor prc = null;
 
             byte[] output = new byte [atts.width*atts.height];
 
-            if(!atts.enableZorder) { 
-                buffer.get(output, 0, atts.width*atts.height);
-            }
-            else {
-                int l = 0;
-                for(int j = 0; j < atts.height; ++j)
-                {
-                    for(int k = 0; k < atts.width; ++k) {
-                        output[l] = buffer.get(zorder.zoGetIndexZOrder(k,j,i));
-                        l++;
-                    }
-                }
-            }
-
+            buffer.get(output, 0, atts.width*atts.height);
+            
             prc = new ByteProcessor(atts.width, atts.height, output);
             imagestack.addSlice((ImageProcessor)prc);   		
             
         }
-
-//        ImagePlus outputImagetmp = new ImagePlus("Temp", imagestack);
-//		outputImagetmp.show();
-        
-		//System.out.println("Wrote! minIndex: " + minIndex + " " + "maxIndex: " + maxIndex);
-		
-        buffer.position(0);
-        
+        buffer.position(0);        
     }
 
+    /**!
+     * Swap the contents of the buffer.
+     */
     void swapBuffers() {
         CLBuffer<ByteBuffer> tmpBuffer = inputBuffer;
         inputBuffer = outputBuffer;
         outputBuffer = tmpBuffer;
+    }
+    
+    /**
+     * Converts byte buffer to float buffer
+     * @param buffer Buffer to be converted
+     * @return       Converted buffer
+     */
+    public CLBuffer<FloatBuffer> convertToFloatBuffer(CLBuffer<ByteBuffer> buffer) {
+    	CLBuffer<FloatBuffer> fbuffer = context.createFloatBuffer(buffer.getCLCapacity(), READ_WRITE); 		
+    	
+    	for(int i = 0; i < buffer.getCLCapacity(); ++i) {
+    		fbuffer.getBuffer().put(i, (float)buffer.getBuffer().get(i));
+    	}
+    	
+    	return fbuffer;
+    }
+    /**
+     * Converts float buffer to byte buffer
+     * @param fbuffer Buffer to be converted
+     * @return        Converted buffer
+     */
+    public CLBuffer<ByteBuffer> convertToByteBuffer(CLBuffer<FloatBuffer> fbuffer) {
+    	
+    	CLBuffer<ByteBuffer> buffer = context.createByteBuffer(fbuffer.getCLCapacity(), READ_WRITE);
+    	
+    	for(int i = 0; i < fbuffer.getCLCapacity(); ++i) {
+    		buffer.getBuffer().put(i, (byte)fbuffer.getBuffer().get(i));
+    	}
+    	
+    	return buffer;
     }
 }

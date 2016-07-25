@@ -3,10 +3,10 @@ package F3DImageProcessing_JOCL_;
 import static com.jogamp.opencl.CLMemory.Mem.READ_WRITE;
 import static java.lang.Math.min;
 import static java.lang.System.nanoTime;
-import ij.IJ;
-
 import java.awt.Component;
 import java.awt.GridLayout;
+import java.io.PrintWriter;
+import java.io.StringWriter;
 import java.nio.FloatBuffer;
 
 import javax.swing.JLabel;
@@ -24,32 +24,27 @@ import com.jogamp.opencl.CLBuffer;
 import com.jogamp.opencl.CLKernel;
 import com.jogamp.opencl.CLProgram;
 
-class BilateralFilter implements JOCLFilter
+/**
+ * BilateralFilter class 
+ */
+class BilateralFilter extends JOCLFilter
 {
 	private int spatialRadius = 3;
 	private int rangeRadius = 30;
 
-    CLAttributes clattr;
-    FilteringAttributes atts;
-    int index;
     CLProgram program;
     CLKernel kernel;
     CLBuffer<FloatBuffer> spatialKernel;
     CLBuffer<FloatBuffer> rangeKernel;
 
-	//"{spatial : 3, range : 512}"
-	//BilateralFilter f = new BilateralFilter();
-	//f.setSpatialRadius(3);
-	//f.setRangeRadius(5);
-	//f.setOptions("spatial=3, range=5");
-	
-	//run("BilateralFilter", "setOptions=spatial=3 range=5");
-
 	public JOCLFilter newInstance() {
 		return new BilateralFilter();
 	}
 	
-	public String toString() {
+    /**
+     * Creates JSON string of filter to be used for scripting mode (recording in ImageJ)
+     */
+	public String toJSONString() {
 		String result = "{ "
 				+ "\"Name\" : \"" + getName() + "\" , "
 				+ "\"spatialRadius\" : \"" + spatialRadius + "\" , "
@@ -58,9 +53,11 @@ class BilateralFilter implements JOCLFilter
 		return result;
 	}
 	
-	public void fromString(String options) {
-		///parse options
-		
+    /**
+     * Creates filter from JSON string
+     * @param options JSON string containing parameters for the filter
+     */
+	public void fromJSONString(String options) {	
 		JSONParser parser = new JSONParser();
 		
 		try {
@@ -76,48 +73,85 @@ class BilateralFilter implements JOCLFilter
 		}
 		
 	}
-
+    /**!
+     * set the spatial radius for the bilateral filter.
+     * @param sRadius - radius size
+     */
 	public void setSpatialRadius(int sRadius) {
 		spatialRadius = sRadius;
 	}
 	
+	/**!
+	 * set the range radius for the bilateral filter
+	 * @param rRadius - radius size
+	 */
 	public void setRangeRadius(int rRadius) {
 		rangeRadius = rRadius;
 	}
 	
+	/**!
+	 * @return spatial radius
+	 */
 	public int getSpatialRadius() {
 		return spatialRadius;
 	}
-	
+	/**!
+	 * 
+	 * @return range radius
+	 */
 	public int getRangeRadius() {
 		return rangeRadius;
 	}
 	
+	/**!
+	 * 
+	 * @return options associated with this filter as a string.
+	 */
 	public String getOptions() {
 		String options = "{}";
 		return options;
 	}
 	
-    @Override
-    public String getName() {
-        return "BilateralFilter";
-    }
-    
-    @Override
-    public int overlapAmount() {
-        return spatialRadius;
-    }
+	/**!
+	 * Get information about this filter. 
+	 * Information includes name, storage type, 3D overlap.
+	 */
+	@Override
+	public FilterInfo getInfo() {
+		FilterInfo info = new FilterInfo();
+		
+		info.name = getName();
+		info.memtype = JOCLFilter.Type.Byte;
+		info.overlapX = spatialRadius;
+		info.overlapY = spatialRadius;
+		info.overlapZ = spatialRadius;
+		
+		return info;
+	}
+	
+	/**!
+	 * Name of the filter. Used in GUI.
+	 */
+	public String getName() {
+		return "BilateralFilter";
+	}
 
-	private CLBuffer<FloatBuffer> makeKernel(CLAttributes clattr, CLProgram program, FilteringAttributes atts, double r)
+    /**
+     * Makes filter kernel for a specific radius value
+     * @param  r radius value
+     * @return float buffer with kernel data.
+     */
+    private CLBuffer<FloatBuffer> makeKernel(double r)
 	{
 		double radius = r + 1;
 
-		int bufferSize = (int)radius*2-1;
-		int localSize = min(clattr.device.getMaxWorkGroupSize(), clattr.minWorkGroup);
-		int globalSize = atts.roundUp(localSize, bufferSize);
-
-//		System.out.println("bufferSize: " + bufferSize + " globalSize: " + globalSize + " localSize: " + localSize);
+		int minWorkingGroup = 256;
+		///TODO: verify if this logic is still necessary.
+		if(clattr.device.getType().toString().equals("CPU")) minWorkingGroup = 64;
 		
+		int bufferSize = (int)radius*2-1;
+		int localSize = min(clattr.device.getMaxWorkGroupSize(), minWorkingGroup);
+		int globalSize = clattr.roundUp(localSize, bufferSize);
 		CLBuffer<FloatBuffer> buffer = clattr.context.createFloatBuffer(globalSize, READ_WRITE);
 
 		CLKernel kernel = program.createCLKernel("makeKernel");
@@ -126,7 +160,6 @@ class BilateralFilter implements JOCLFilter
 		.putArg(buffer)
 		.putArg(bufferSize);
 		
-
 		long time = nanoTime();
 	
 		clattr.queue.put1DRangeKernel(kernel, 0, globalSize, localSize)
@@ -149,99 +182,125 @@ class BilateralFilter implements JOCLFilter
 
 		time = nanoTime() - time;
 
-		//System.out.println("kernel created in :" + ((double)time)/1000000.0);
-
-        //buffer.getBuffer().position(0);
-        //for(int i = 0; i < bufferSize; ++i)
-        //    System.out.println(buffer.getBuffer().get(i));
-        //buffer.getBuffer().position(0);
-
         kernel.release();
         normalizeKernel.release();
 		return buffer;
 	}
 
+    /**!
+     * Run the spatial and range kernels to compute weights 
+     * and setup the Bilateral Filter kernel.
+     */
 	@Override
-	public int getDimensions()
+	public boolean loadKernel()
 	{
-		return 2;
-	}
-
-    @Override
-    public void setAttributes(CLAttributes c, FilteringAttributes a, int idx)
-    {
-        clattr = c;
-        atts = a;
-        index = idx;
-    }
-    
-	@Override
-    public boolean loadKernel()
-    {
+		String bilateral_comperror="";
         try {
-            String filename = "/OpenCL/" + (atts.enableZorder ? "BilateralFilterZorder.cl" : 
-                                                                "BilateralFiltering.cl");
+        	/**!
+        	 * Load the OpenCL kernel file.
+        	 * TODO: possibly replace this with string version.
+        	 */
+            String filename = "/OpenCL/BilateralFiltering.cl";
             program = clattr.context.createProgram(BilateralFilter.class.getResourceAsStream(filename)).build();
-
+        	
+//        	String kernel = HelperFunctionKernels + 
+//					   		BilateralFilterKernel;
+//        	
+//        	program = clattr.context.createProgram(kernel);
+//        	program.build();
         }
         catch(Exception e) {
             e.printStackTrace();
             System.out.println("KERNEL Failed to Compile");
+            
+            StringWriter errors = new StringWriter();
+			e.printStackTrace(new PrintWriter(errors));
+            
+            bilateral_comperror = errors.toString()+"\n"+
+            		"Message exception: "+e.getMessage()+"\n";
+            monitor.setKeyValue("bilateral.comperror", bilateral_comperror);
+                        
             return false;
         }
-        
-        
-        // TALITA
-//        if(clattr.outputTmpBuffer == null)
-//		    clattr.outputTmpBuffer = clattr.context.createByteBuffer(clattr.inputBuffer.getBuffer().capacity(), READ_WRITE);
-        //
-        
-		spatialKernel = makeKernel(clattr, program, atts, spatialRadius);
-		rangeKernel = makeKernel(clattr, program, atts, rangeRadius);
+        monitor.setKeyValue("bilateral.comperror", bilateral_comperror);
+
+        /**!
+         * Make and invoke spatial and range kernels.
+         * return buffer data associated with kernel execution.
+         */
+        spatialKernel = makeKernel(spatialRadius);
+		rangeKernel = makeKernel(rangeRadius);
 
 		kernel = program.createCLKernel("BilateralFilter");
-
-
-		
         return true;
-    }
-
+	}
+	
+    /**
+     * Main run method 
+     */
 	@Override
 	public boolean runFilter()
 	{
-//        System.out.println(atts.width + " " + atts.height + " " + atts.maxSliceCount.get(index) + " " + spatialRadius + " " + rangeRadius);
+		String bilateral_allocerror="";
+		
+		int globalSize[] = {0, 0}, localSize[] = {0, 0};
+		clattr.computeWorkingGroupSize(localSize, globalSize, new int[] {atts.width, atts.height, 1});
+		
+		try {
+		
+			/**!
+			 * write input data to the accelerator
+			 */
+			clattr.queue.putWriteBuffer(clattr.inputBuffer, true); //Hari version
         
-        kernel.setArg(0,clattr.inputBuffer)
-		.setArg(1,clattr.outputBuffer)
-		.setArg(2,atts.width)
-		.setArg(3,atts.height)
-		.setArg(4,atts.maxSliceCount.get(index))
-		.setArg(5,spatialKernel)
-		.setArg(6,(int)(spatialRadius+1)*2-1)
-		.setArg(7,rangeKernel)
-		.setArg(8,(int)(rangeRadius+1)*2-1);
+			/**!
+			 * setup kernel with arguments.
+			 */
+			//System.out.println(" " + atts.maxSliceCount.get(index) + " " + atts.overlap.get(index));
+			kernel.setArg(0,clattr.inputBuffer)
+			.setArg(1,clattr.outputBuffer)
+			.setArg(2,atts.width)
+			.setArg(3,atts.height)
+			.setArg(4,atts.maxSliceCount.get(index) + getInfo().overlapZ)
+			//.setArg(4,atts.maxSliceCount.get(index))
+			.setArg(5,spatialKernel)
+			.setArg(6,(int)(spatialRadius+1)*2-1)
+			.setArg(7,rangeKernel)
+			.setArg(8,(int)(rangeRadius+1)*2-1);
 
-        if(atts.enableZorder) {
-            kernel.setArg(9, clattr.zorder.zIbits)
-                  .setArg(10, clattr.zorder.zJbits)
-                  .setArg(11, clattr.zorder.zKbits);
-        }
-		//write out results..
-		//for some reason jogamp on fiji does not have 3DRangeKernel call..
-		//clattr.queue.putWriteBuffer(clattr.inputBuffer, false);
-		clattr.queue.putWriteBuffer(clattr.inputBuffer, true); //Hari version
-        clattr.queue.put2DRangeKernel(kernel, 0, 0, 
-                                        clattr.globalSize[0], clattr.globalSize[1], 
-                                        clattr.localSize[0], clattr.localSize[1]);
+			/**!
+			 * create kernel work group which includes local and global
+			 * work sizes.
+			 */
+			clattr.queue.put2DRangeKernel(kernel, 0, 0, 
+					globalSize[0], globalSize[1], 
+					localSize[0], localSize[1]);
 
-		//clattr.queue.putReadBuffer(clattr.outputBuffer, false).finish();
+		} catch (Exception e) {
+			 
+		    StringWriter errors = new StringWriter();
+			e.printStackTrace(new PrintWriter(errors));
+            
+            bilateral_allocerror = errors.toString()+"\n"+
+            		"Message exception: "+e.getMessage()+"\n";
+            
+            monitor.setKeyValue("bilateral.allocerror", bilateral_allocerror);
+            return false;
+			
+		}
+		
+		/**!
+		 * Write out results.
+		 */
+        monitor.setKeyValue("bilateral.allocerror", bilateral_allocerror);
 		clattr.queue.putReadBuffer(clattr.outputBuffer, true).finish(); //Hari version
-		
-		
 		
         return true;
 	}
 
+	/**!
+	 * Release memory and kernels held by this filter.
+	 */
     @Override
     public boolean releaseKernel() {
     	if (!spatialKernel.isReleased()) spatialKernel.release();
@@ -251,6 +310,10 @@ class BilateralFilter implements JOCLFilter
         return true;
     }
 
+    /**
+     * Creates custom interface for the filter 
+     * @return Window Component
+     */
 	@Override
 	public Component getFilterWindowComponent() {
 		
@@ -278,7 +341,6 @@ class BilateralFilter implements JOCLFilter
 			public void stateChanged(ChangeEvent e) {
 				JSpinner spinner = (JSpinner) e.getSource();
 				rangeRadius = (Integer)spinner.getValue();
-				//System.out.println("--X" + rangeRadius);
 			}
 		});
 
@@ -294,8 +356,94 @@ class BilateralFilter implements JOCLFilter
 		return panel;
 	}
 
-	@Override
-	public void processFilterWindowComponent() {
-		
+	/**!
+	 * calls this function in case user interface needs to process
+	 * when Filter is activated.
+	 */
+	public void processFilterWindowComponent() {		
 	}
+
+	
+	/**!
+	 * TODO: use in future (instead of file version)
+	 */
+	final String BilateralFilterKernel =
+			
+"	float dynamicKernel(float radius, int index)\n" +
+"	{\n" +
+"	    float x = (index + 1 - radius) / (radius * 2) / 0.2;\n" +
+"	    return (float)exp(-0.5 * x * x);\n" +
+"	}\n" +
+
+"	kernel void makeKernel(float radius, global float* output, const int output_size)\n" +
+"	{\n" +
+"	    size_t i = get_global_id(0);\n" +
+"	    if(i >= output_size) return;\n" +
+"	    output[i] = dynamicKernel(radius,i);\n" +
+"	}\n" +
+
+"	kernel void normalizeKernel(float total, global float* output, const int output_size)\n" +
+"	{\n" +
+"		size_t i = get_global_id(0);\n" +
+"	    if(i >=  output_size) return;\n" +
+"	     if (total <= 0.0)\n" +
+"	        output[i] = 1.0f / output_size;\n" +
+"	     else if (total != 1.0)\n" +
+"	        output[i] /= total;\n" +
+"	}\n" +
+
+"	void BilateralFilter3D(const int3 pos, const int3 sizes, \n" +
+"            global const uchar* inputBuffer, global uchar* outputBuffer, \n" +
+"            global const float* spatialKernel, const int spatialSize,\n" +
+"            global const float* rangeKernel, const int rangeSize)\n" +
+"	{\n" +
+"		int v0 =  getValue(inputBuffer, pos, sizes);\n" +
+
+"		int sc = (int)spatialSize / 2;\n" +
+"		int rc = (int)rangeSize / 2;\n" +
+
+"		float v = 0;\n" +
+"		float total = 0;\n" +
+
+"		for (int n = 0; n < spatialSize; ++n)\n" +
+"		{\n" +
+"			for (int m = 0; m < spatialSize; ++m)\n" +
+"			{\n" +
+"				for (int k = 0; k < spatialSize; ++k)\n" +
+"				{\n" +
+" 					int3 pos2 = { pos.x + n - sc, pos.y + m - sc, pos.z + k - sc };\n" +
+" 					int v1 = getValue(inputBuffer, pos2, sizes);\n" +
+
+" 					if(v1 < 0) continue;\n" +
+" 					if(abs(v1-v0) > rc) continue;\n" +
+
+" 					float w = spatialKernel[m] * spatialKernel[n] * rangeKernel[v1 - v0 + rc];\n" +
+" 					v += v1 * w;\n" +
+" 					total += w;\n" +
+"    			}\n" +
+"   		}\n" +
+"  		}\n" +
+"		setValue(outputBuffer, pos, sizes, (int)(v/total));\n" +
+"	}\n" +
+
+"kernel void BilateralFilter(global const uchar* inputBuffer, global uchar* outputBuffer,\n" +  
+"             				 const int imageWidth, const int imageHeight, const int imageDepth,\n" +
+"             				 global const float* spatialKernel, const int spatialSize,\n" +
+"             				 global const float* rangeKernel, const int rangeSize)\n" +
+"{\n" +
+
+"	const int3 sizes = { imageWidth, imageHeight, imageDepth };\n" +
+"	int3 pos = { get_global_id(0), get_global_id(1), 0 };\n" +
+
+"	if(isOutsideBounds(pos, sizes)) return;\n" +
+
+"	for(int i = 0; i < imageDepth; ++i)\n" +
+"	{\n" +
+"		int3 pos = { get_global_id(0), get_global_id(1), i };\n" +
+"		BilateralFilter3D(pos, sizes,\n" + 
+"               inputBuffer, outputBuffer,\n" +     
+"               spatialKernel, spatialSize,\n" + 
+"               rangeKernel, rangeSize);\n" +
+"  	}\n" +    
+"}\n";
 }

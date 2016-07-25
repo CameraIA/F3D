@@ -1,13 +1,14 @@
 package F3DImageProcessing_JOCL_;
 
 import static java.lang.System.nanoTime;
-import ij.IJ;
 import ij.ImageStack;
 
 import java.awt.Component;
 import java.awt.GridLayout;
 import java.awt.event.ItemEvent;
 import java.awt.event.ItemListener;
+import java.io.PrintWriter;
+import java.io.StringWriter;
 import java.nio.ByteBuffer;
 
 import com.jogamp.opencl.CLBuffer;
@@ -21,32 +22,44 @@ import javax.swing.JPanel;
 import org.json.simple.JSONObject;
 import org.json.simple.parser.JSONParser;
 import org.json.simple.parser.ParseException;
-
-class MaskFilter implements JOCLFilter
+/**!
+ * Filter to perform mask operations in OpenCL
+ * @author hari
+ */
+class MaskFilter extends JOCLFilter
 {
-	FilteringAttributes.FilterPanel filterPanel =
-			new FilteringAttributes.FilterPanel();
-	
+    CLBuffer<ByteBuffer> maskBuffer = null;
+    CLProgram program;
+    CLKernel kernel;
+
 	String[] maskChoices = { "mask3D" };
     String selectedMaskChoice = "";
-    int index;
     
+    /**!
+     * Create new instance of Mask Filter.
+     * @return new mask filter
+     */
     @Override
     public JOCLFilter newInstance() {
 		return new MaskFilter();
 	}
     
-	public String toString() {
+    /**!
+     * Serialize data to JSON string format
+     */
+	public String toJSONString() {
 		String result = "{ " 
 				+ "\"Name\" : \"" + getName() + "\" , "
 				+ "\"selectedMaskChoice\" : \"" + selectedMaskChoice  + "\" , "
-				+ "\"Mask\" : " + filterPanel.toString()
+				+ "\"Mask\" : " + filterPanel.toJSONString()
 				+ " }";
-//		System.out.println(result);
 		return result;
 	}
 	
-	public void fromString(String options) {
+    /**!
+     * DeSerialize data to JSON string format
+     */
+	public void fromJSONString(String options) {
 		///parse options
 		
 		JSONParser parser = new JSONParser();
@@ -62,64 +75,75 @@ class MaskFilter implements JOCLFilter
 			e.printStackTrace();
 		}
 		
-		filterPanel.fromString(options);
-		
+		filterPanel.fromJSONString(options);
 	}
 	
+	/**!
+	 * Get information about this filter. 
+	 * Information includes name, storage type, 3D overlap.
+	 */	
     @Override
-    public String getName()
+    public FilterInfo getInfo()
     {
-        return "MaskFilter";
+        FilterInfo info = new FilterInfo();
+        info.name = getName();
+        info.memtype = JOCLFilter.Type.Byte;
+        info.overlapX = info.overlapY = info.overlapZ = 0;
+        return info;
     }
-
-    @Override
-    public int overlapAmount() {
-        return 0;
-    }
-
-	public int getDimensions()
-	{
-		return 1;
-	}
-
-    CLAttributes clattr;
-    FilteringAttributes atts;
-    CLBuffer<ByteBuffer> maskBuffer = null;
-    CLProgram program;
-    CLKernel kernel;
     
-    @Override
-    public void setAttributes(CLAttributes c, FilteringAttributes a, int idx)
-    {
-        clattr = c;
-        atts = a;
-        index = idx;
+	/**!
+	 * Name of the filter. Used in GUI.
+	 */
+    public String getName() {
+    	return "MaskFilter";
     }
-
+    
+    /**!
+     * Load and build Mask Filter.
+     */
     @Override
     public boolean loadKernel()
     {
+    	String mask_comperror = "";
         try {
-//        	program = clattr.context.createProgram(MedianFilter.class.getResourceAsStream("/OpenCL/Mask3D.cl")).build();
         	program = clattr.context.createProgram(MaskFilter.class.getResourceAsStream("/OpenCL/Mask3D.cl")).build();
         }
         catch(Exception e){
+        	
+            StringWriter errors = new StringWriter();
+			e.printStackTrace(new PrintWriter(errors));
+            
+            mask_comperror = errors.toString()+"\n"+
+            		"Message exception: "+e.getMessage()+"\n";
+                    	
             return false;
         }
         
-	    kernel = program.createCLKernel(selectedMaskChoice);
+        /**!
+         * create kernel with chosen mask.
+         */
+        monitor.setKeyValue("mask.comperror", mask_comperror);
+        kernel = program.createCLKernel(selectedMaskChoice);
         return true;
     }
 
+    /**!
+     * Run mask filter with mask chosen by user.
+     */
 	@Override
 	public boolean runFilter()
 	{
+		String mask_allocerror = "";
 		ImageStack mask = filterPanel.maskImages.get(0);   // maskImages NULL??
 		int[] size = new int [3];
 		size[0] = mask.getWidth();
 		size[1] = mask.getHeight();
 		size[2] = mask.getSize();
 
+		/**
+		 * error checking.
+		 */
         if(atts.width*atts.height*atts.slices != size[0]*size[1]*size[2])
         {
             System.out.println("Mask not equal Original image");
@@ -130,27 +154,47 @@ class MaskFilter implements JOCLFilter
 
         long time = nanoTime();
 
-        maskBuffer = atts.getStructElement(clattr.context, mask, clattr.globalSize[0]);
+        /**!
+         * create mask buffer and setup parameters 
+         * and working group.
+         */
+		int globalSize[] = {0}, localSize[] = {0};
+		clattr.computeWorkingGroupSize(localSize, globalSize, 
+							new int[] {atts.width, atts.height, 
+									   (atts.maxSliceCount.get(index) + atts.overlap.get(index))});
+
+		maskBuffer = atts.getStructElement(clattr.context, mask, globalSize[0]);
     
         kernel.setArg(0,clattr.inputBuffer)
         .setArg(1,maskBuffer)
         .setArg(2,clattr.outputBuffer)
         .setArg(3,atts.width)
         .setArg(4,atts.height)
-        .setArg(5,atts.maxSliceCount.get(index));
+        .setArg(5,atts.maxSliceCount.get(index) + atts.overlap.get(index));
         
-//    	System.out.println(selectedMaskChoice);
-		
-        //write out results..
-        //for some reason jogamp on fiji does not have 3DRangeKernel call..
-        clattr.queue.putWriteBuffer(clattr.inputBuffer, true);
-        clattr.queue.finish();
+		try {
+			///write data to accelerator
+        	clattr.queue.putWriteBuffer(clattr.inputBuffer, true);
+            clattr.queue.finish();
+            
+            clattr.queue.putWriteBuffer(maskBuffer, true);
+            clattr.queue.putWriteBuffer(clattr.outputBuffer, true); // ???
+            
+            //run kernel
+            clattr.queue.put1DRangeKernel(kernel, 0, globalSize[0], localSize[0]);
+        } catch (Exception e) {
+            StringWriter errors = new StringWriter();
+			e.printStackTrace(new PrintWriter(errors));
+            
+            mask_allocerror = errors.toString()+"\n"+
+            		"Message exception: "+e.getMessage()+"\n";            
+
+        }
         
-        clattr.queue.putWriteBuffer(maskBuffer, true);
-        clattr.queue.putWriteBuffer(clattr.outputBuffer, true); // ???
-        clattr.queue.put1DRangeKernel(kernel, 0, 
-	            clattr.globalSize[0], 
-	            clattr.localSize[0]);
+		/**!
+		 * Write results back to CLBuffer
+		 */
+        monitor.setKeyValue("mask.allocerror", mask_allocerror);
         clattr.queue.putReadBuffer(clattr.outputBuffer, true);
         
         clattr.queue.finish();
@@ -162,6 +206,9 @@ class MaskFilter implements JOCLFilter
 		return true;
 	}
 
+	/**!
+	 * Release filter resources.
+	 */
     @Override
     public boolean releaseKernel()
     {
@@ -170,6 +217,9 @@ class MaskFilter implements JOCLFilter
         return true;
     }
 
+    /**!
+     * Create custom user interface.
+     */
 	@SuppressWarnings({ "rawtypes", "unchecked" })
 	@Override
 	public Component getFilterWindowComponent() {
@@ -211,6 +261,9 @@ class MaskFilter implements JOCLFilter
         return panel;
 	}
 
+	/**!
+	 * Create template mask if needed or retrieve one from Fiji.
+	 */
 	@Override
 	public void processFilterWindowComponent() {
 		filterPanel.processFilterWindowComponent();

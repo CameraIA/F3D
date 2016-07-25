@@ -7,189 +7,45 @@ import ij.ImageStack;
 
 import java.util.*;
 import java.util.regex.*;
-import java.awt.event.ItemEvent;
-import java.awt.event.ItemListener;
-import java.io.File;
 import java.nio.ByteBuffer;
-
-import javax.swing.JComboBox;
-import javax.swing.JLabel;
-import javax.swing.JPanel;
-import javax.swing.JSpinner;
-import javax.swing.SpinnerNumberModel;
-import javax.swing.event.ChangeEvent;
-import javax.swing.event.ChangeListener;
-
-import org.json.simple.JSONArray;
-import org.json.simple.JSONObject;
-import org.json.simple.parser.JSONParser;
-import org.json.simple.parser.ParseException;
 
 import com.jogamp.opencl.CLBuffer;
 import com.jogamp.opencl.CLContext;
 
 import ij.WindowManager;
 
+/**!
+ * General class to represent attributes needed for filtering
+ * such as filter pipeline, image width, height, number of slices to process.
+ * Also contains helper functions to generate masks.
+ * @author hari
+ *
+ */
 class FilteringAttributes
 {
-	public static class FilterPanel
-	{
-		public int L = -1;
-		public String maskImage = "";
-		ArrayList<ImageStack> maskImages = null;
-		
-		public String toString() {
-			String result = "[{"
-							+ "\"maskImage\" : \"" + maskImage + "\""
-							+ (maskImage.startsWith("StructuredElementL") ? ", \"maskLen\" : \"" + L + "\"" : "")
-							+ "}]";
-			return result;
-		}
-		
-		public void fromString(String str) {
-			// TALITA JSON parser
-			JSONParser parser = new JSONParser();
-					
-			try {
-				 
-				Object objFilter = parser.parse(str);
-				JSONObject jsonFilterObject = (JSONObject) objFilter;
-				
-				JSONArray maskArray = (JSONArray) jsonFilterObject.get("Mask");
-							
-				JSONObject jsonMaskObject = (JSONObject) maskArray.get(0);
-				
-				maskImage = (String) jsonMaskObject.get("maskImage");
-				if (null!=jsonMaskObject.get("maskLen"))
-					L = Integer.valueOf((String)jsonMaskObject.get("maskLen"));
-				else
-					L = -1;
-				
-		 
-			} catch (ParseException e) {
-				e.printStackTrace();
-			}
-						
-		}
-		
-		public JPanel setupInterface() 
-	    {
-			JPanel panel = new JPanel();	
-	        JLabel label = new JLabel("Mask:");
-	        
-	        //fiji complains when I use JComboBox<String>
-	        //@SuppressWarnings({ "rawtypes", "unchecked" }) 
-			JComboBox aw = new JComboBox(FilteringAttributes.getImageTitles(true));
-	        
-	        L = 3;
-	        maskImage = (String)aw.getSelectedItem();
-	        
-	        final JSpinner spinner = new JSpinner(new SpinnerNumberModel(L, 1, 20, 1));
-	        
-	        aw.setSelectedItem(maskImage);
-	        
-	        aw.addItemListener(new ItemListener() {
-				@Override
-				public void itemStateChanged(ItemEvent e) {
-					if(e.getStateChange() == java.awt.event.ItemEvent.SELECTED) {
-						maskImage =  (String) e.getItem();
-						spinner.setVisible(maskImage.startsWith("StructuredElementL") ? true : false);
-					}
-				}
-			});
-
-	        spinner.addChangeListener(new ChangeListener() {
-				
-				@Override
-				public void stateChanged(ChangeEvent e) {
-					JSpinner s = (JSpinner)e.getSource();
-					L = (Integer) s.getValue();
-//					System.out.println(L);
-				}
-			});
-	        
-	        panel.add(label);
-	        panel.add(aw);
-	        panel.add(spinner);
-	        
-	        return panel;
-	    }
-		
-		void processFilterWindowComponent() {
-			maskImages = FilteringAttributes.getStructElements(maskImage, L);
-			//System.out.println("maskImage: " + maskImage);
-			//System.out.println("L: " + L);
-		}
-	};
+	ArrayList<JOCLFilter> pipeline = new ArrayList<JOCLFilter>();
 	
-	public HashMap<String, JOCLFilter> filterList;
-	public ArrayList<JOCLFilter> filters;
-
-	public ImagePlus inputImage = null;
-
 	public int width = 0;
     public int height = 0;
     public int channels = 0;
     public int slices = 0;
     
-    List<Integer> maxSliceCount = new ArrayList<Integer>();
-    public int sliceStart = 0;
-    public int sliceEnd = 0;
+    public int sliceStart = 0, sliceEnd = 0;
+    public int maxOverlap = 0;
+    
     List<Integer> overlap = new ArrayList<Integer>();
+    List<Integer> maxSliceCount = new ArrayList<Integer>();
     
     public boolean intermediateSteps = false;
-	public boolean enableZorder = false;
-	public boolean useVirtualStack = false;
-	public File virtualDirectory = null;
+    public boolean preview = false;
 	public boolean chooseConstantDevices = false;
 	public int inputDeviceLength = 1;
-
-    /// internalImages
-    private static final int MAX_STRUCTELEM_SIZE = 21*21*21;
-    private static ArrayList<String> internalImages;
-
-    public int zOrderWidth = 0, zOrderHeight = 0; //zOrderDepth = 0;
-    List<Integer> zOrderDepth = new ArrayList<Integer>();
-
-    static {
-	     internalImages = new ArrayList<String>();
-	
-	     internalImages.add("StructuredElementL");        
-	     internalImages.add(String.format("Diagonal%dx%dx%d", 3, 3, 3));
-	     internalImages.add(String.format("Diagonal%dx%dx%d", 10, 10, 4));
-	     internalImages.add(String.format("Diagonal%dx%dx%d", 10, 10, 10));
-    }
-
-    public FilteringAttributes() {
-    	
-    	filterList = new HashMap<String, JOCLFilter>();
-    	//filterList = new ArrayList<JOCLFilter>();
-        filters = new ArrayList<JOCLFilter>();
-        
-        /// list all filters..
-        ArrayList<JOCLFilter> filters = new ArrayList<JOCLFilter>();
-        filters.add(new BilateralFilter());
-        filters.add(new MedianFilter());
-        filters.add(new MMFilterEro());
-        filters.add(new MMFilterDil());
-        filters.add(new MMFilterOpe());
-        filters.add(new MMFilterClo());
-        filters.add(new MaskFilter());
-        
-        for(int i = 0; i < filters.size(); ++i){
-        	filterList.put(filters.get(i).getName(), filters.get(i));
-        }
-    }
     
-    public int roundUp(int groupSize, int globalSize) {
-		int r = globalSize % groupSize;
-		if (r == 0) {
-			return globalSize;
-		} else {
-			return globalSize + groupSize - r;
-		}
-	}
-    
+    /**
+     * Get list of titles of opened images
+     * @param  includeInternal Include all internal images or not
+     * @return                 List of string with image titles
+     */
     public static String[] getImageTitles(boolean includeInternal) 
     {	
 		ArrayList<String> activeWindowsList = new ArrayList<String>();
@@ -202,10 +58,30 @@ class FilteringAttributes
         return activeWindows;
     }
     
-    private static void getImageTitles(ArrayList<String> inputArray, boolean includeInternal) 
+    private static final int MAX_STRUCTELEM_SIZE = 21*21*21;
+    private static ArrayList<String> internalImages;
+
+    /**!
+     * Static construction of masks.
+     */
+    static {
+	     internalImages = new ArrayList<String>();
+	
+	     internalImages.add("StructuredElementL");        
+	     internalImages.add(String.format("Diagonal%dx%dx%d", 3, 3, 3));
+	     internalImages.add(String.format("Diagonal%dx%dx%d", 10, 10, 4));
+	     internalImages.add(String.format("Diagonal%dx%dx%d", 10, 10, 10));
+   }
+	
+    /**!
+     * Create list of available images from Fiji 
+     * @param inputArray
+     * @param includeInternal (include ones we create internally)
+     */
+    private static void getImageTitles(ArrayList<String> imageArray, boolean includeInternal) 
     {
         if(includeInternal) 
-            inputArray.addAll(internalImages);
+        	imageArray.addAll(internalImages);
        
         int[] idlist = WindowManager.getIDList();
 		for(int i = 0; i < idlist.length; ++i)
@@ -216,11 +92,18 @@ class FilteringAttributes
             if(title.length() == 0)
 				title = "Image: " + idlist[i];
 
-			inputArray.add(title);
+            imageArray.add(title);
 		}
     }
 
-    private static boolean parseImage(String inputString, ArrayList<ImageStack> images, int maskL)
+    /**!
+     * Parse selection and mask return imageStack
+     * @param inputString - input name of desired image
+     * @param images - output stack
+     * @param maskL - optionally mask for desired image
+     * @return whether operation was successful
+     */
+    private static boolean parseImage(String inputString, int maskL, ArrayList<ImageStack> images)
     {
         if(inputString.length() == 0)
             return false;
@@ -267,6 +150,11 @@ class FilteringAttributes
         return false;
     }
  
+    /**!
+     * Build an ImageStack from Diagonal lengths.
+     * @param L - diagonal length.
+     * @return return number of stacks to fulfill request.
+     */
     private static ArrayList<ImageStack> buildStructElementArray(int L)
     {
         ArrayList<ImageStack> images = new ArrayList<ImageStack>();
@@ -340,13 +228,18 @@ class FilteringAttributes
             processor.set(L-j-1,j,255);
         }
         images.add(stack);
-/*
-        for(int i = 0; i < images.size(); ++i)
-            images.get(i).show();
-*/      
+        //for(int i = 0; i < images.size(); ++i)
+        //    images.get(i).show();
         return images;
     }
     
+    /**!
+     * Build diagonal image given width, height, and number of slices.
+     * @param width - width of image
+     * @param height - height of image
+     * @param slices - depth of image
+     * @return image stack 
+     */
     private static ImageStack buildDiagonalImage(int width, int height, int slices) 
     {
         ImageStack stack = ImageStack.create(width, height, slices, 8);
@@ -362,41 +255,51 @@ class FilteringAttributes
         return stack;
     }
     
-    private static ArrayList<ImageStack> getStructElements(String maskImage, int maskL)
+    /**!
+     * Helper function signature to return stack of images given mask name and diagonal length.
+     * @param maskImage - mask name
+     * @param maskL - length
+     * @return array of image stacks 
+     */
+    public static ArrayList<ImageStack> getStructElements(String maskImage, int maskL)
     {
         ArrayList<ImageStack> images = new ArrayList<ImageStack>();
-        parseImage(maskImage, images, maskL);
+        parseImage(maskImage, maskL, images);
         return images; 
     }
     
-    /// Helper functions..
 
-//    public int[] getStructElementSize(ImageStack stack)
-//    {
-//        int[] size = new int[3];
-//
-//        size[0] = stack.getWidth();
-//        size[1] = stack.getHeight();
-//        size[2] = stack.getSize();
-//
-//        return size;  
-//    }
-
+    /**!
+     * Test if stack is valid
+     * @param stack
+     * @return whether stack contains of valid structure (TODO: create better test)
+     */
     public boolean isValidStructElement(ImageStack stack) 
-    {
-        ///int[] elemSize = getStructElementSize(stack);
-        
+    {        
         if(stack.getWidth()*stack.getHeight()*stack.getSize()>= MAX_STRUCTELEM_SIZE) {
            return false;
         }
         return true;
     }
 
+    /**!
+     * Return CL data from image stack
+     * @param context - OpenCL context
+     * @param stack - input image stack
+     * @return - returns CL buffer.
+     */
     public CLBuffer<ByteBuffer> getStructElement(CLContext context, ImageStack stack)
     {
         return getStructElement(context, stack, -1);
     }
 
+    /**!
+     * Create buffer but with the size overridden
+     * @param context - OpenCL context
+     * @param stack - input image stack
+     * @param overrideSize - new size
+     * @return output buffer
+     */
     public CLBuffer<ByteBuffer> getStructElement(CLContext context, ImageStack stack, int overrideSize) 
     {
         //if(!isValidImage(stack.getTitle()))
@@ -419,8 +322,6 @@ class FilteringAttributes
         for(int i = 0; i < size[2]; ++i)
         {
             ByteProcessor prc  = (ByteProcessor)stack.getProcessor(i+1);
-            //BufferedImage bi = prc.getBufferedImage();
-            //DataBufferByte sb = (DataBufferByte) bi.getRaster().getDataBuffer();
             structElem.getBuffer().put((byte[])prc.getPixels());//(sb.getData());
         }
 

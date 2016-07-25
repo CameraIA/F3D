@@ -1,12 +1,12 @@
 package F3DImageProcessing_JOCL_;
 
-import static com.jogamp.opencl.CLMemory.Mem.READ_WRITE;
 import static java.lang.System.nanoTime;
 import static java.lang.System.out;
-import ij.IJ;
 import ij.ImageStack;
 
 import java.awt.Component;
+import java.io.PrintWriter;
+import java.io.StringWriter;
 import java.nio.ByteBuffer;
 
 import com.jogamp.opencl.CLBuffer;
@@ -16,37 +16,66 @@ import com.jogamp.opencl.CLProgram;
 import java.util.ArrayList;
 
 import javax.swing.JPanel;
-//Dilation
-class MMFilterDil implements JOCLFilter
+/**!
+ * Implementation of the Dilation operation.
+ * @author hari
+ *
+ */
+class MMFilterDil extends JOCLFilter
 {
-	int index;
-	FilteringAttributes.FilterPanel filterPanel =
-			new FilteringAttributes.FilterPanel();
-	
+	/**!
+	 * Construct a new instance of the filter.
+	 */
     @Override
     public JOCLFilter newInstance() {
 		return new MMFilterDil();
 	}
     
-	public String toString() {
+    /**!
+     * Serialize to JSON string format.
+     */
+	public String toJSONString() {
 		String result = "{ " 
 				+ "\"Name\" : \"" + getName() + "\" , "
-				+ "\"Mask\" : " + filterPanel.toString() 
+				+ "\"Mask\" : " + filterPanel.toJSONString() 
 				+ " }";
 			return result;
 	}
 	
-	public void fromString(String str) {
-		filterPanel.fromString(str);
+	/**!
+	 * Deserialize from JSON string format.
+	 */
+	public void fromJSONString(String str) {
+		filterPanel.fromJSONString(str);
 	}
-
-    @Override
+	
+	/**!
+	 * Get information about this filter. 
+	 * Information includes name, storage type, 3D overlap.
+	 */
+	@Override
+    public FilterInfo getInfo()
+    {
+		FilterInfo info = new FilterInfo();
+		info.name = getName();
+		info.memtype = JOCLFilter.Type.Byte;
+		info.useTempBuffer = true;
+		info.overlapX = info.overlapY = info.overlapZ = overlapAmount();
+		return info;
+    }
+	
+	/**!
+	 * Name of the filter. Used in GUI.
+	 */
     public String getName()
     {
         return "MMFilterDil";
     }
 
-    @Override
+    /**!
+     * Compute overlap amount needed from the user selected information.
+     * @return
+     */
     public int overlapAmount() {
     	int overlapAmount = 0;
     	
@@ -57,43 +86,37 @@ class MMFilterDil implements JOCLFilter
         return overlapAmount;
     }
 
-	@Override
-	public int getDimensions()
-	{
-		return 2;
-	}
-
-    CLAttributes clattr;
-    FilteringAttributes atts;
-
-    @Override
-    public void setAttributes(CLAttributes c, FilteringAttributes a, int idx)
-    {
-        clattr = c;
-        atts = a;
-        index = idx;
-    }
-
     CLProgram program;
     CLKernel kernel, kernel2;
 
+    /**!
+     * Setup the filter for execution
+     */
     @Override
     public boolean loadKernel()
     {
+    	String dilation_comperror = "";
         try {
-            String filename = "/OpenCL/" + (atts.enableZorder ? "MMdil3DZorder.cl" : 
-                                                                "MMdil3D.cl");
-            program = clattr.context.createProgram(BilateralFilter.class.getResourceAsStream(filename)).build();    
+            String filename = "/OpenCL/MMdil3D.cl";
+           	program = clattr.context.createProgram(BilateralFilter.class.getResourceAsStream(filename)).build();
         }
         catch(Exception e){
             e.printStackTrace();
             System.out.println("KERNEL Failed to Compile");
+            
+            StringWriter errors = new StringWriter();
+			e.printStackTrace(new PrintWriter(errors));
+            
+            dilation_comperror = errors.toString()+"\n"+
+            		"Message exception: "+e.getMessage()+"\n";
+            
+            monitor.setKeyValue("dilation.comperror", dilation_comperror);
+
+            
             return false;
         }
+        monitor.setKeyValue("dilation.comperror", dilation_comperror);
          
-        if(clattr.outputTmpBuffer == null)
-		    clattr.outputTmpBuffer = clattr.context.createByteBuffer(clattr.inputBuffer.getBuffer().capacity(), READ_WRITE);
-        
         kernel = program.createCLKernel("MMdil3DFilterInit");
         kernel2 = program.createCLKernel("MMdil3DFilter");
 
@@ -102,10 +125,23 @@ class MMFilterDil implements JOCLFilter
         return true;
     }
 
-    public void runKernel(ArrayList<ImageStack> maskImages)
+    /**!
+     * run the kernel on a set of mask images. This usually entails variable structured elements.
+     * @param maskImages
+     * @return
+     */
+    public boolean runKernel(ArrayList<ImageStack> maskImages, int overlapAmount)
     {     
 	    CLBuffer<ByteBuffer> structElem = null;
 	
+	    String dilation_allocerror = "";
+		
+	    int globalSize[] = {0, 0}, localSize[] = {0, 0};
+		clattr.computeWorkingGroupSize(localSize, globalSize, new int[] {atts.width, atts.height, 1});
+
+		/**!
+		 * run kernel over all the mask images.
+		 */
         for(int i = 0; i < maskImages.size(); ++i) 
         {
             ImageStack mask = maskImages.get(i);
@@ -131,6 +167,9 @@ class MMFilterDil implements JOCLFilter
                     endOffset = 0;
             }
     
+            /** 
+             * set up first execution
+             */
             if(i == 0) {
               kernel.setArg(0,clattr.inputBuffer)
 	            .setArg(1,clattr.outputTmpBuffer)
@@ -144,18 +183,12 @@ class MMFilterDil implements JOCLFilter
                 .setArg(9,startOffset)
                 .setArg(10,endOffset);
 
-              // Just debugging some stuff
-//              out.println("Kernel args: Input buffer: " + clattr.inputBuffer.getCLCapacity() + " Output buffer: " + clattr.outputTmpBuffer.getCLCapacity() + " atts.width: " + atts.width 
-//            		  + " atts.height: " + atts.height + " atts.maxSliceCount: " + atts.maxSliceCount + " atts.overlap: " + atts.overlap
-//            		  + " structElemn: " + structElem.getCLCapacity() + " Size: " + size[0] + " " + size[1] + " " + size[2] + " startOffSet: " +startOffset 
-//            		  + " endOffset " + endOffset);
-              
-                if(atts.enableZorder) {
-                    kernel.setArg(11, clattr.zorder.zIbits)
-                          .setArg(12, clattr.zorder.zJbits)
-                          .setArg(13, clattr.zorder.zKbits);
-                }
             } else {
+            	/**!
+            	 * > 1 masks
+            	 * This is called when the output from the iteration needs to be the
+            	 * input in the new filter.
+            	 */
               CLBuffer<ByteBuffer> tmpBuffer1, tmpBuffer2;
             
               tmpBuffer1 = i % 2 != 0 ? clattr.outputTmpBuffer : clattr.outputBuffer;
@@ -166,50 +199,59 @@ class MMFilterDil implements JOCLFilter
 	            .setArg(2,tmpBuffer2)
 	            .setArg(3,atts.width)
 	            .setArg(4,atts.height)
-	            .setArg(5,atts.maxSliceCount.get(index))
+	            .setArg(5,atts.maxSliceCount.get(index) + atts.overlap.get(index))
 	            .setArg(6,structElem)
 	            .setArg(7,size[0])
 	            .setArg(8,size[1])
 	            .setArg(9,size[2])
                 .setArg(10,startOffset)
                 .setArg(11,endOffset);
-                
-              // Just debugging some stuff
-//              out.println("Kernel2 args: input Buffer: " + clattr.inputBuffer.getCLCapacity() + " tmp buffer1: " + tmpBuffer1.getCLCapacity() 
-//            		  + " tmp buffer2: " + tmpBuffer2.getCLCapacity() 
-//            		  + " atts.width: " + atts.width + " atts.height: " + atts.height + " atts.maxSliceCount: " + atts.maxSliceCount 
-//            		  + " structElemn: " + structElem.getCLCapacity() + " Size: " + size[0] + " " + size[1] + " " + size[2] + " startOffSet: " +startOffset 
-//            		  + " endOffset " + endOffset);
-              
-                if(atts.enableZorder) {
-                    kernel2.setArg(12, clattr.zorder.zIbits)
-                          .setArg(13, clattr.zorder.zJbits)
-                          .setArg(14, clattr.zorder.zKbits);
-                }
             }
             
-//            out.println("clattr.globalSize: " + clattr.globalSize[0] + " " + clattr.globalSize[1]);
-//            out.println("clattr.localSize: " + clattr.localSize[0] + " " + clattr.localSize[1]);
-            
+            /**!
+             * copy element to accelerator
+             */
             clattr.queue.putWriteBuffer(structElem, true);
-	        clattr.queue.put2DRangeKernel(i == 0 ? kernel : kernel2, 0, 0, 
-                                            clattr.globalSize[0], clattr.globalSize[1], 
-                                            clattr.localSize[0], clattr.localSize[1]);
-        
-	        //clattr.queue.finish();
-            structElem.release();
+	        
+            /**!
+             * run the kernel.
+             */
+            try {
+            	clattr.queue.put2DRangeKernel(i == 0 ? kernel : kernel2, 0, 0, 
+                        globalSize[0], globalSize[1], 
+                        localSize[0], localSize[1]);            	
+            } catch (Exception e) {
+            	
+                StringWriter errors = new StringWriter();
+    			e.printStackTrace(new PrintWriter(errors));
+                
+                dilation_allocerror = errors.toString()+"\n"+
+                		"Message exception: "+e.getMessage()+"\n";
+                
+                monitor.setKeyValue("dilation.allocerror", dilation_allocerror);
+
+            	return false;
+            }
             
-           
+            structElem.release();
         }
 
+        monitor.setKeyValue("dilation.allocerror", dilation_allocerror);
+        
+        /**!
+         * swap buffers from input to output.
+         */
         if(maskImages.size() % 2 != 0) {
             CLBuffer<ByteBuffer> tmpBuffer = clattr.outputTmpBuffer;
             clattr.outputTmpBuffer = clattr.outputBuffer;
             clattr.outputBuffer = tmpBuffer;
         }
-
+        return true;
     }
 
+    /**!
+     * run the filter.
+     */
 	@Override
 	public boolean runFilter()
 	{
@@ -229,14 +271,11 @@ class MMFilterDil implements JOCLFilter
         clattr.queue.putWriteBuffer(clattr.inputBuffer, false);
         clattr.queue.finish();
 
-        runKernel(filterPanel.maskImages);
+        runKernel(filterPanel.maskImages, overlapAmount());
        
         clattr.queue.putReadBuffer(clattr.outputBuffer, false);
         //clattr.outputTmpBuffer.release();
         clattr.queue.finish();
-
-//        kernel.release();
-//        kernel2.release();
         
 		time = nanoTime() - time;
 
@@ -245,6 +284,9 @@ class MMFilterDil implements JOCLFilter
 		return true;
 	}
 
+	/**!
+	 * Release filter resources.
+	 */
     @Override
     public boolean releaseKernel() 
     {
@@ -253,6 +295,9 @@ class MMFilterDil implements JOCLFilter
         return true;
     }
 
+    /**!
+     * Construct custom user interface.
+     */
 	@Override
 	public Component getFilterWindowComponent() {
 		JPanel panel = new JPanel();
@@ -260,8 +305,12 @@ class MMFilterDil implements JOCLFilter
         return panel;
 	}
 
+	/**!
+	 * Callback for processing user selection.
+	 */
 	@Override
 	public void processFilterWindowComponent() {
 		filterPanel.processFilterWindowComponent();
 	}
+
 }
