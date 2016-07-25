@@ -1,7 +1,16 @@
 README F3D Image Processing
 
 Authors: Talita Perciano, Dani Ushizima and Hari Krishnan
-September 2015
+July 2016
+
+HOW TO BUILD F3D USING ECLIPSE
+
+1 - Clone the git repository to your working directory
+2 - In Eclipse, go to File -> Import...
+3 - Choose Mavec -> Existing Maven Projects
+4 - Choose the 'F3D' root directory of the cloned repo
+5 - After importing the project, right click on the project's name and go to Properties -> Java Build Path -> Add JARS...
+6 - Add the two jar files in the 'libraries' path under 'F3D'
 
 HOW TO INSTALL F3D
 
