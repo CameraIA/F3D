@@ -1,6 +1,6 @@
 README F3D Image Processing
 
-Authors: Talita Perciano, Dani Ushizima and Hari Krishnan
+Authors: Dani Ushizima, Hari Krishnan and Talita Perciano
 July 2016
 
 HOW TO BUILD F3D USING ECLIPSE
