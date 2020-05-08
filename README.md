@@ -4,6 +4,6 @@ F3D is a Fiji plugin, designed for high-resolution 3D image, and written in Open
 
 Update: F3D has been ported to python under the name pyF3D:
 
-https://github.com/holdymoldy/pyF3D
+https://github.com/dani-lbnl/pyF3D
 
-Contact camera.image.processing@gmail.com for more informations
+Contact dani.lbnl@gmail.com for more informations
